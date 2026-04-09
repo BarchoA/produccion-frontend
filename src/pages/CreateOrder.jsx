@@ -3,1202 +3,487 @@ import { supabase } from "../lib/supabase";
 import { parsePDF, extraerDatos } from "../utils/pdfParser";
 import { useAuth } from "../context/AuthContext";
 
-const lineasOptions = [
-  "",
-  "Sellos",
-  "Sublimación",
-  "UV",
-  "Textil",
-  "Plotter",
-  "Láser",
-  "Otros",
-];
+const LINEAS = ["", "Sellos", "Sublimación", "UV", "Textil", "Plotter", "Láser", "Otros"];
+const TINTAS = ["", "Negra", "Azul", "Roja", "Verde", "Morada", "Otros"];
+const UV_FORMATS = { "A3 (42x29.7 cm)": 1, "A4 (29.7x21 cm)": 0.5, "A5 (21x14.8 cm)": 0.25, "A6 (14.8x10.5 cm)": 0.125 };
 
-const tintaOptions = [
-  "",
-  "Negra",
-  "Azul",
-  "Roja",
-  "Verde",
-  "Morada",
-  "Otros",
-];
-
-const UV_DTF_FORMATS = {
-  'A3 (42x29.7 cm)': 1,
-  'A4 (29.7x21 cm)': 0.5,
-  'A5 (21x14.8 cm)': 0.25,
-  'A6 (14.8x10.5 cm)': 0.125,
+const LINE_META = {
+  Sellos: { icon: "🔖", color: "#6366f1", bg: "#eef2ff", desc: "Sellos automáticos y personalizados" },
+  Sublimación: { icon: "🌈", color: "#ec4899", bg: "#fdf2f8", desc: "Impresión por sublimación" },
+  UV: { icon: "🔆", color: "#f59e0b", bg: "#fffbeb", desc: "Impresión UV directa y DTF" },
+  Textil: { icon: "👕", color: "#10b981", bg: "#f0fdf4", desc: "Bordado y serigrafía textil" },
+  Plotter: { icon: "✂️", color: "#0ea5e9", bg: "#f0f9ff", desc: "Corte e impresión en plotter" },
+  Láser: { icon: "⚡", color: "#ef4444", bg: "#fff1f2", desc: "Grabado y corte láser" },
+  Otros: { icon: "📦", color: "#94a3b8", bg: "#f8fafc", desc: "Otros trabajos y servicios" },
 };
 
-function createEmptyItem() {
-  return {
-    description: "",
-    quantity: 1,
-    unit_value: 0,
-    line_total: 0,
-    linea: "",
-    inventory_mode: "catalogo",
-    product_id: null,
-    variant_id: null,
-    catalog_item_id: null,
-    specs: {
-      tinta: "",
-      uv: false,
-    },
-  };
+function emptyItem() {
+  return { description: "", quantity: 1, unit_value: 0, line_total: 0, linea: "", inventory_mode: "catalogo", product_id: null, variant_id: null, catalog_item_id: null, specs: { tinta: "", uv: false } };
 }
+function norm(v) { const n = Number(v); return isFinite(n) ? n : 0; }
+function uvEquiv(specs = {}) { return UV_FORMATS[specs.formato] || 0; }
 
-function normalizeNumber(value) {
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : 0;
-}
-
-function getFieldTypeIsNumeric(field) {
-  return (
-    field === "quantity" ||
-    field === "line_total" ||
-    field === "unit_value"
-  );
-}
-
-function getUVEquivalentFromSpecs(specs = {}) {
-  const formato = specs.formato || "";
-  if (!formato) return 0;
-  return UV_DTF_FORMATS[formato] || 0;
-}
-
-function buildUvCostData(item, uvCatalogItems, uvResources) {
-  if (item.linea !== "UV" || !item.catalog_item_id) {
-    return {
-      costo_unitario: 0,
-      subtotal_costo: 0,
-      cost_breakdown: [],
-    };
+function buildUvCost(item, uvItems, uvRes) {
+  if (item.linea !== "UV" || !item.catalog_item_id) return { costo_unitario: 0, subtotal_costo: 0, cost_breakdown: [] };
+  const ci = uvItems.find(x => x.id === item.catalog_item_id);
+  if (!ci) return { costo_unitario: 0, subtotal_costo: 0, cost_breakdown: [] };
+  if (ci.slug === "uv-textil") {
+    const m2 = norm(item.specs?.metros_cuadrados);
+    const res = uvRes.find(r => r.slug === "uv-textil-m2");
+    const base = norm(res?.costo_unitario);
+    const cu = m2 * base; const sub = cu * norm(item.quantity);
+    return { costo_unitario: +cu.toFixed(2), subtotal_costo: +sub.toFixed(2), cost_breakdown: [{ type: "resource", resource_slug: "uv-textil-m2", resource_name: res?.nombre || "UV Textil m2", unit: "m2", quantity: m2, unit_cost: base, total_cost: +cu.toFixed(2) }] };
   }
-
-  const selectedCatalogItem = uvCatalogItems.find(
-    (catalogItem) => catalogItem.id === item.catalog_item_id
-  );
-
-  if (!selectedCatalogItem) {
-    return {
-      costo_unitario: 0,
-      subtotal_costo: 0,
-      cost_breakdown: [],
-    };
+  if (ci.slug === "uv-dtf") {
+    const eq = norm(item.specs?.equivalente) || uvEquiv(item.specs);
+    const res = uvRes.find(r => r.slug === "uv-dtf-a3");
+    const base = norm(res?.costo_unitario);
+    const cu = eq * base; const sub = cu * norm(item.quantity);
+    return { costo_unitario: +cu.toFixed(2), subtotal_costo: +sub.toFixed(2), cost_breakdown: [{ type: "resource", resource_slug: "uv-dtf-a3", resource_name: res?.nombre || "UV DTF A3", unit: "plancha", quantity: eq, unit_cost: base, total_cost: +cu.toFixed(2), formato: item.specs?.formato || "" }] };
   }
-
-  if (selectedCatalogItem.slug === "uv-textil") {
-    const metrosCuadrados = normalizeNumber(item.specs?.metros_cuadrados);
-    const textilResource = uvResources.find(
-      (resource) => resource.slug === "uv-textil-m2"
-    );
-
-    const costoBase = normalizeNumber(textilResource?.costo_unitario);
-    const costoUnitario = metrosCuadrados * costoBase;
-    const subtotalCosto = costoUnitario * normalizeNumber(item.quantity);
-
-    return {
-      costo_unitario: Number(costoUnitario.toFixed(2)),
-      subtotal_costo: Number(subtotalCosto.toFixed(2)),
-      cost_breakdown: [
-        {
-          type: "resource",
-          resource_slug: "uv-textil-m2",
-          resource_name: textilResource?.nombre || "UV Textil m2",
-          unit: "m2",
-          quantity: metrosCuadrados,
-          unit_cost: costoBase,
-          total_cost: Number(costoUnitario.toFixed(2)),
-        },
-      ],
-    };
-  }
-
-  if (selectedCatalogItem.slug === "uv-dtf") {
-    const equivalente =
-      normalizeNumber(item.specs?.equivalente) ||
-      getUVEquivalentFromSpecs(item.specs);
-    const dtfResource = uvResources.find(
-      (resource) => resource.slug === "uv-dtf-a3"
-    );
-
-    const costoBase = normalizeNumber(dtfResource?.costo_unitario);
-    const costoUnitario = equivalente * costoBase;
-    const subtotalCosto = costoUnitario * normalizeNumber(item.quantity);
-
-    return {
-      costo_unitario: Number(costoUnitario.toFixed(2)),
-      subtotal_costo: Number(subtotalCosto.toFixed(2)),
-      cost_breakdown: [
-        {
-          type: "resource",
-          resource_slug: "uv-dtf-a3",
-          resource_name: dtfResource?.nombre || "UV DTF Plancha A3",
-          unit: "plancha",
-          quantity: equivalente,
-          unit_cost: costoBase,
-          total_cost: Number(costoUnitario.toFixed(2)),
-          formato: item.specs?.formato || "",
-        },
-      ],
-    };
-  }
-
-  return {
-    costo_unitario: 0,
-    subtotal_costo: 0,
-    cost_breakdown: [],
-  };
+  return { costo_unitario: 0, subtotal_costo: 0, cost_breakdown: [] };
 }
 
 export default function CreateOrder() {
   const { profile } = useAuth();
-
   const [file, setFile] = useState(null);
   const [loading, setLoading] = useState(false);
-  const [previewData, setPreviewData] = useState(null);
+  const [preview, setPreview] = useState(null);
   const [priority, setPriority] = useState("media");
-
   const [products, setProducts] = useState([]);
-  const [productVariants, setProductVariants] = useState([]);
+  const [variants, setVariants] = useState([]);
+  const [uvItems, setUvItems] = useState([]);
+  const [uvAttrs, setUvAttrs] = useState([]);
+  const [uvRes, setUvRes] = useState([]);
 
-  const [uvCatalogItems, setUvCatalogItems] = useState([]);
-  const [uvAttributes, setUvAttributes] = useState([]);
-  const [uvResources, setUvResources] = useState([]);
+  const sellosProducts = useMemo(() => products.filter(p => p.linea === "Sellos"), [products]);
 
-  const sellosProducts = useMemo(
-    () => products.filter((p) => p.linea === "Sellos"),
-    [products]
-  );
+  useEffect(() => { fetchCatalog(); }, []);
 
-  useEffect(() => {
-    fetchInventoryCatalog();
-  }, []);
-
-  async function fetchInventoryCatalog() {
+  async function fetchCatalog() {
     try {
-      const [
-        { data: productsData, error: productsError },
-        { data: variantsData, error: variantsError },
-        { data: catalogItemsData, error: catalogItemsError },
-        { data: uvAttributesData, error: uvAttributesError },
-        { data: uvResourcesData, error: uvResourcesError },
-      ] = await Promise.all([
-        supabase
-          .from("products")
-          .select("*")
-          .eq("linea", "Sellos")
-          .eq("is_active", true)
-          .order("nombre"),
-        supabase
-          .from("product_variants")
-          .select("*")
-          .eq("is_active", true)
-          .order("nombre"),
-        supabase
-          .from("catalog_items")
-          .select("*")
-          .eq("linea", "UV")
-          .eq("is_active", true)
-          .order("nombre"),
-        supabase
-          .from("catalog_item_attributes")
-          .select("*")
-          .eq("is_active", true)
-          .order("sort_order", { ascending: true }),
-        supabase
-          .from("inventory_resources")
-          .select("*")
-          .eq("linea", "UV")
-          .eq("is_active", true)
-          .order("nombre"),
+      const [{ data: pd }, { data: vd }, { data: cd }, { data: ad }, { data: rd }] = await Promise.all([
+        supabase.from("products").select("*").eq("linea", "Sellos").eq("is_active", true).order("nombre"),
+        supabase.from("product_variants").select("*").eq("is_active", true).order("nombre"),
+        supabase.from("catalog_items").select("*").eq("linea", "UV").eq("is_active", true).order("nombre"),
+        supabase.from("catalog_item_attributes").select("*").eq("is_active", true).order("sort_order", { ascending: true }),
+        supabase.from("inventory_resources").select("*").eq("linea", "UV").eq("is_active", true).order("nombre"),
       ]);
-
-      if (productsError) throw productsError;
-      if (variantsError) throw variantsError;
-      if (catalogItemsError) throw catalogItemsError;
-      if (uvAttributesError) throw uvAttributesError;
-      if (uvResourcesError) throw uvResourcesError;
-
-      setProducts(productsData || []);
-      setProductVariants(variantsData || []);
-      setUvCatalogItems(catalogItemsData || []);
-      setUvAttributes(uvAttributesData || []);
-      setUvResources(uvResourcesData || []);
-    } catch (error) {
-      console.error("Error cargando catálogo de inventario:", error);
-    }
+      setProducts(pd || []); setVariants(vd || []); setUvItems(cd || []); setUvAttrs(ad || []); setUvRes(rd || []);
+    } catch (e) { console.error(e); }
   }
 
   if (profile?.rol !== "admin") {
     return (
-      <div className="rounded-3xl border border-red-200 bg-red-50 p-6 text-red-700 shadow-sm">
-        <h2 className="text-lg font-semibold">Acceso restringido</h2>
-        <p className="mt-2 text-sm">Solo el rol admin puede crear órdenes.</p>
+      <div style={S.restricted}>
+        <span style={{ fontSize: "48px" }}>🔒</span>
+        <h3 style={{ fontSize: "20px", fontWeight: 700, margin: 0 }}>Acceso restringido</h3>
+        <p style={{ color: "#94a3b8", margin: 0 }}>Solo el rol admin puede crear órdenes.</p>
       </div>
     );
-  }
-
-  function enrichParsedItem(item) {
-    return {
-      description: item.description || "",
-      quantity: Number(item.quantity || 0),
-      unit_value: Number(item.unit_value || 0),
-      line_total: Number(item.line_total || 0),
-      linea: item.linea || "",
-      inventory_mode: "catalogo",
-      product_id: null,
-      variant_id: null,
-      catalog_item_id: null,
-      specs: {
-        tinta: "",
-        uv: false,
-      },
-    };
   }
 
   async function handleUpload() {
-    if (!file) {
-      alert("Selecciona un PDF");
-      return;
-    }
-
+    if (!file) { alert("Selecciona un PDF"); return; }
     try {
       setLoading(true);
-      const text = await parsePDF(file);
-      const data = extraerDatos(text);
-      const enrichedItems = (data.items || []).map(enrichParsedItem);
-
-      setPreviewData({
-        ...data,
-        items: enrichedItems,
-      });
-    } catch (error) {
-      console.error("Error procesando PDF:", error);
-      alert("Error procesando PDF");
-    } finally {
-      setLoading(false);
-    }
+      const { parsePDF: pPDF, extraerDatos: eD } = await import("../utils/pdfParser");
+      const text = await pPDF(file);
+      const data = eD(text);
+      setPreview({ ...data, items: (data.items || []).map(i => ({ description: i.description || "", quantity: Number(i.quantity || 0), unit_value: Number(i.unit_value || 0), line_total: Number(i.line_total || 0), linea: i.linea || "", inventory_mode: "catalogo", product_id: null, variant_id: null, catalog_item_id: null, specs: { tinta: "", uv: false } })) });
+    } catch (e) { alert("Error procesando PDF"); } finally { setLoading(false); }
   }
 
-  function updateField(field, value) {
-    setPreviewData((prev) => ({
-      ...prev,
-      [field]: value,
-    }));
+  function upd(field, value) { setPreview(p => ({ ...p, [field]: value })); }
+  function updDesc(value) { setPreview(p => ({ ...p, descripcion_orden: value, operational_summary: { ...p.operational_summary, descripcion_orden: value } })); }
+  function updItem(idx, field, value) {
+    setPreview(p => { const items = [...p.items]; items[idx] = { ...items[idx], [field]: ["quantity","line_total","unit_value"].includes(field) ? Number(value) : value }; return { ...p, items }; });
   }
-
-  function updateDescripcionOrden(value) {
-    setPreviewData((prev) => ({
-      ...prev,
-      descripcion_orden: value,
-      operational_summary: {
-        ...prev.operational_summary,
-        descripcion_orden: value,
-      },
-    }));
-  }
-
-  function updateItem(index, field, value) {
-    setPreviewData((prev) => {
-      const newItems = [...prev.items];
-      newItems[index] = {
-        ...newItems[index],
-        [field]: getFieldTypeIsNumeric(field) ? Number(value) : value,
-      };
-
-      return {
-        ...prev,
-        items: newItems,
-      };
+  function updSpecs(idx, key, value) {
+    setPreview(p => {
+      const items = [...p.items]; const cur = items[idx]; const specs = { ...(cur.specs || {}), [key]: value };
+      if (cur.linea === "UV" && key === "formato") specs.equivalente = uvEquiv(specs);
+      items[idx] = { ...cur, specs }; return { ...p, items };
     });
   }
-
-  function updateItemSpecs(index, specKey, value) {
-    setPreviewData((prev) => {
-      const newItems = [...prev.items];
-      const currentItem = newItems[index];
-      const nextSpecs = {
-        ...(currentItem.specs || {}),
-        [specKey]: value,
-      };
-
-      if (currentItem.linea === "UV" && specKey === "formato") {
-        nextSpecs.equivalente = getUVEquivalentFromSpecs(nextSpecs);
-      }
-
-      newItems[index] = {
-        ...currentItem,
-        specs: nextSpecs,
-      };
-
-      return {
-        ...prev,
-        items: newItems,
-      };
+  function updLinea(idx, value) {
+    setPreview(p => {
+      const items = [...p.items]; const cur = items[idx];
+      const baseSpecs = value === "Sellos" ? { tinta: cur.specs?.tinta || "", uv: cur.specs?.uv || false } : {};
+      items[idx] = { ...cur, linea: value, inventory_mode: value === "Sellos" ? cur.inventory_mode || "catalogo" : "catalogo", product_id: value === "Sellos" ? cur.product_id : null, variant_id: value === "Sellos" ? cur.variant_id : null, catalog_item_id: value === "UV" ? cur.catalog_item_id : null, specs: baseSpecs };
+      return { ...p, items };
     });
   }
-
-  function updateItemLinea(index, value) {
-    setPreviewData((prev) => {
-      const newItems = [...prev.items];
-      const current = newItems[index];
-
-      const baseSpecs =
-        value === "Sellos"
-          ? {
-              tinta: current.specs?.tinta || "",
-              uv: current.specs?.uv || false,
-            }
-          : {};
-
-      newItems[index] = {
-        ...current,
-        linea: value,
-        inventory_mode: value === "Sellos" ? current.inventory_mode || "catalogo" : "catalogo",
-        product_id: value === "Sellos" ? current.product_id : null,
-        variant_id: value === "Sellos" ? current.variant_id : null,
-        catalog_item_id: value === "UV" ? current.catalog_item_id : null,
-        specs: baseSpecs,
-      };
-
-      return {
-        ...prev,
-        items: newItems,
-      };
-    });
+  function updUvItem(idx, id) {
+    const ci = uvItems.find(x => x.id === id);
+    const initSpecs = ci?.slug === "uv-textil" ? { modo_trabajo: "", articulo: "", metros_cuadrados: 0, cantidad: 0 } : ci?.slug === "uv-dtf" ? { modo_dtf: "", formato: "", equivalente: 0, destino: "" } : {};
+    setPreview(p => { const items = [...p.items]; items[idx] = { ...items[idx], catalog_item_id: id || null, product_id: null, variant_id: null, specs: initSpecs }; return { ...p, items }; });
   }
+  function addItem() { setPreview(p => ({ ...p, items: [...(p.items || []), emptyItem()] })); }
+  function removeItem(idx) { setPreview(p => { const items = p.items.filter((_, i) => i !== idx); return { ...p, items, subtotal: items.reduce((a, i) => a + norm(i.line_total), 0) }; }); }
+  function recalc() { setPreview(p => ({ ...p, subtotal: (p.items || []).reduce((a, i) => a + norm(i.line_total), 0) })); }
 
-  function updateSellosMode(index, mode) {
-    setPreviewData((prev) => {
-      const newItems = [...prev.items];
-      newItems[index] = {
-        ...newItems[index],
-        inventory_mode: mode,
-        product_id: null,
-        variant_id: null,
-      };
-
-      return {
-        ...prev,
-        items: newItems,
-      };
-    });
-  }
-
-  function updateSellosProduct(index, productId) {
-    setPreviewData((prev) => {
-      const newItems = [...prev.items];
-      newItems[index] = {
-        ...newItems[index],
-        product_id: productId || null,
-        variant_id: null,
-      };
-
-      return {
-        ...prev,
-        items: newItems,
-      };
-    });
-  }
-
-  function updateSellosVariant(index, variantId) {
-    setPreviewData((prev) => {
-      const newItems = [...prev.items];
-      newItems[index] = {
-        ...newItems[index],
-        variant_id: variantId || null,
-      };
-
-      return {
-        ...prev,
-        items: newItems,
-      };
-    });
-  }
-
-  function updateUvCatalogItem(index, catalogItemId) {
-    const selectedItem = uvCatalogItems.find((item) => item.id === catalogItemId);
-    const initialSpecs = {};
-
-    if (selectedItem?.slug === "uv-textil") {
-      initialSpecs.modo_trabajo = "";
-      initialSpecs.articulo = "";
-      initialSpecs.metros_cuadrados = 0;
-      initialSpecs.cantidad = 0;
-    }
-
-    if (selectedItem?.slug === "uv-dtf") {
-      initialSpecs.modo_dtf = "";
-      initialSpecs.formato = "";
-      initialSpecs.equivalente = 0;
-      initialSpecs.destino = "";
-    }
-
-    setPreviewData((prev) => {
-      const newItems = [...prev.items];
-      newItems[index] = {
-        ...newItems[index],
-        catalog_item_id: catalogItemId || null,
-        product_id: null,
-        variant_id: null,
-        specs: initialSpecs,
-      };
-
-      return {
-        ...prev,
-        items: newItems,
-      };
-    });
-  }
-
-  function getVariantsForProduct(productId) {
-    return productVariants.filter((variant) => variant.product_id === productId);
-  }
-
-  function getUvAttributesForItem(catalogItemId) {
-    return uvAttributes.filter((attribute) => attribute.item_id === catalogItemId);
-  }
-
-  function getUvCatalogItemById(catalogItemId) {
-    return uvCatalogItems.find((item) => item.id === catalogItemId) || null;
-  }
-
-  function renderDynamicAttribute(index, item, attribute) {
-    const options = Array.isArray(attribute.options) ? attribute.options : [];
-    const value = item.specs?.[attribute.attribute_key];
-
-    if (item.linea === "UV" && attribute.attribute_key === "equivalente") {
-      const equivalenteValue =
-        normalizeNumber(item.specs?.equivalente) || getUVEquivalentFromSpecs(item.specs);
-
-      return (
-        <div key={attribute.id}>
-          <label className="mb-2 block text-sm font-medium text-slate-700">
-            {attribute.label}
-          </label>
-          <input
-            type="number"
-            step="0.001"
-            value={equivalenteValue}
-            readOnly
-            className="w-full rounded-xl border border-slate-300 bg-slate-100 px-4 py-3 text-sm outline-none"
-          />
-        </div>
-      );
-    }
-
-    if (attribute.field_type === "select") {
-      return (
-        <div
-          key={attribute.id}
-          className={attribute.attribute_key === "observacion_tecnica" ? "md:col-span-2" : ""}
-        >
-          <label className="mb-2 block text-sm font-medium text-slate-700">
-            {attribute.label}
-          </label>
-          <select
-            value={value || ""}
-            onChange={(e) => updateItemSpecs(index, attribute.attribute_key, e.target.value)}
-            className="w-full rounded-xl border border-slate-300 bg-white px-4 py-3 text-sm outline-none focus:border-slate-500"
-          >
-            <option value="">
-              {attribute.label.startsWith("Modo") ||
-              attribute.attribute_key === "formato" ||
-              attribute.attribute_key === "material"
-                ? `Seleccionar ${attribute.label.toLowerCase()}`
-                : "Seleccionar opción"}
-            </option>
-            {options.map((option) => (
-              <option key={`${attribute.id}-${option}`} value={option}>
-                {option}
-              </option>
-            ))}
-          </select>
-        </div>
-      );
-    }
-
-    if (attribute.field_type === "number") {
-      return (
-        <div key={attribute.id}>
-          <label className="mb-2 block text-sm font-medium text-slate-700">
-            {attribute.label}
-          </label>
-          <input
-            type="number"
-            step="0.01"
-            value={value || 0}
-            onChange={(e) =>
-              updateItemSpecs(index, attribute.attribute_key, Number(e.target.value))
-            }
-            className="w-full rounded-xl border border-slate-300 px-4 py-3 text-sm outline-none focus:border-slate-500"
-          />
-        </div>
-      );
-    }
-
-    if (attribute.field_type === "boolean") {
-      const boolValue = Boolean(value);
-
-      return (
-        <div key={attribute.id}>
-          <label className="mb-2 block text-sm font-medium text-slate-700">
-            {attribute.label}
-          </label>
-          <div className="flex items-center gap-3">
-            <button
-              type="button"
-              onClick={() => updateItemSpecs(index, attribute.attribute_key, true)}
-              className={`rounded-xl px-4 py-2 text-sm font-medium ${
-                boolValue ? "bg-slate-900 text-white" : "bg-slate-100 text-slate-700"
-              }`}
-            >
-              Sí
-            </button>
-            <button
-              type="button"
-              onClick={() => updateItemSpecs(index, attribute.attribute_key, false)}
-              className={`rounded-xl px-4 py-2 text-sm font-medium ${
-                value === false ? "bg-slate-900 text-white" : "bg-slate-100 text-slate-700"
-              }`}
-            >
-              No
-            </button>
-          </div>
-        </div>
-      );
-    }
-
-    return (
-      <div
-        key={attribute.id}
-        className={attribute.attribute_key === "observacion_tecnica" ? "md:col-span-2" : ""}
-      >
-        <label className="mb-2 block text-sm font-medium text-slate-700">
-          {attribute.label}
-        </label>
-        <input
-          value={value || ""}
-          onChange={(e) => updateItemSpecs(index, attribute.attribute_key, e.target.value)}
-          className="w-full rounded-xl border border-slate-300 px-4 py-3 text-sm outline-none focus:border-slate-500"
-          placeholder={attribute.label}
-        />
-      </div>
-    );
-  }
-
-  function recalculateSubtotalFromItems() {
-    setPreviewData((prev) => {
-      const subtotal = prev.items.reduce(
-        (acc, item) => acc + (Number(item.line_total) || 0),
-        0
-      );
-
-      return {
-        ...prev,
-        subtotal,
-      };
-    });
-  }
-
-  function addManualItem() {
-    setPreviewData((prev) => ({
-      ...prev,
-      items: [...(prev.items || []), createEmptyItem()],
-    }));
-  }
-
-  function removeItem(index) {
-    setPreviewData((prev) => {
-      const newItems = prev.items.filter((_, i) => i !== index);
-      const subtotal = newItems.reduce(
-        (acc, item) => acc + (Number(item.line_total) || 0),
-        0
-      );
-
-      return {
-        ...prev,
-        items: newItems,
-        subtotal,
-      };
-    });
-  }
-
-  async function guardarOrden() {
-    if (!file || !previewData) {
-      alert("Falta información para guardar la orden");
-      return;
-    }
-
+  async function guardar() {
+    if (!file || !preview) { alert("Falta información"); return; }
     try {
       setLoading(true);
-
-      const fileName = `${Date.now()}-${file.name}`;
-      const { error: uploadError } = await supabase.storage
-        .from("pdfs")
-        .upload(fileName, file);
-
-      if (uploadError) throw uploadError;
-
-      const pdfUrl = supabase.storage.from("pdfs").getPublicUrl(fileName).data.publicUrl;
-
-      const itemsForOrder = previewData.items.map((item) => {
-        const uvCostData =
-          item.linea === "UV"
-            ? buildUvCostData(item, uvCatalogItems, uvResources)
-            : {
-                costo_unitario: 0,
-                subtotal_costo: 0,
-                cost_breakdown: [],
-              };
-
-        return {
-          description: item.description,
-          quantity: item.quantity,
-          unit_value: item.unit_value,
-          line_total: item.line_total,
-          linea: item.linea,
-          inventory_mode: item.inventory_mode,
-          product_id: item.product_id,
-          variant_id: item.variant_id,
-          catalog_item_id: item.catalog_item_id,
-          specs: item.specs || {},
-          costo_unitario: uvCostData.costo_unitario || null,
-          subtotal_costo: uvCostData.subtotal_costo || null,
-          cost_breakdown: uvCostData.cost_breakdown || [],
-        };
+      const fn = `${Date.now()}-${file.name}`;
+      const { error: ue } = await supabase.storage.from("pdfs").upload(fn, file);
+      if (ue) throw ue;
+      const pdfUrl = supabase.storage.from("pdfs").getPublicUrl(fn).data.publicUrl;
+      const itemsData = preview.items.map(item => {
+        const uvC = item.linea === "UV" ? buildUvCost(item, uvItems, uvRes) : { costo_unitario: 0, subtotal_costo: 0, cost_breakdown: [] };
+        return { ...item, costo_unitario: uvC.costo_unitario || null, subtotal_costo: uvC.subtotal_costo || null, cost_breakdown: uvC.cost_breakdown || [] };
       });
-
-      const { data: order, error: orderError } = await supabase
-        .from("orders")
-        .insert([
-          {
-            estado: "Nuevo",
-            prioridad: priority,
-            pdf_url: pdfUrl,
-            total_venta: previewData.subtotal,
-            data_json: {
-              order_number: previewData.order_number,
-              cliente: {
-                nombre: previewData.client_name,
-                telefono: previewData.phone,
-              },
-              items: itemsForOrder,
-              descripcion_orden: previewData.descripcion_orden,
-              operational_summary: previewData.operational_summary,
-            },
-          },
-        ])
-        .select()
-        .single();
-
-      if (orderError) throw orderError;
-
-      for (const item of previewData.items) {
-        const uvCostData =
-          item.linea === "UV"
-            ? buildUvCostData(item, uvCatalogItems, uvResources)
-            : {
-                costo_unitario: null,
-                subtotal_costo: null,
-                cost_breakdown: [],
-              };
-
-        const { error: itemError } = await supabase.from("order_items").insert([
-          {
-            order_id: order.id,
-            descripcion: item.description,
-            linea: item.linea || null,
-            cantidad: item.quantity,
-            precio_unitario: item.unit_value,
-            subtotal_venta: item.line_total,
-            costo_unitario: item.linea === "UV" ? uvCostData.costo_unitario : null,
-            subtotal_costo: item.linea === "UV" ? uvCostData.subtotal_costo : null,
-            product_id: item.product_id,
-            variant_id: item.variant_id,
-            catalog_item_id: item.catalog_item_id,
-            specs: item.specs || {},
-            cost_breakdown: item.linea === "UV" ? uvCostData.cost_breakdown : [],
-          },
-        ]);
-
-        if (itemError) throw itemError;
-
-        if (
-          item.linea === "Sellos" &&
-          item.inventory_mode === "catalogo" &&
-          item.variant_id &&
-          Number(item.quantity) > 0
-        ) {
-          const { error: stockError } = await supabase.rpc("decrement_variant_stock", {
-            p_variant_id: item.variant_id,
-            p_quantity: Number(item.quantity),
-          });
-
-          if (stockError) throw stockError;
+      const { data: order, error: oe } = await supabase.from("orders").insert([{
+        estado: "Nuevo", prioridad: priority, pdf_url: pdfUrl, total_venta: preview.subtotal,
+        data_json: { order_number: preview.order_number, cliente: { nombre: preview.client_name, telefono: preview.phone }, items: itemsData, descripcion_orden: preview.descripcion_orden, operational_summary: preview.operational_summary },
+      }]).select().single();
+      if (oe) throw oe;
+      for (const item of preview.items) {
+        const uvC = item.linea === "UV" ? buildUvCost(item, uvItems, uvRes) : { costo_unitario: null, subtotal_costo: null, cost_breakdown: [] };
+        const { error: ie } = await supabase.from("order_items").insert([{ order_id: order.id, descripcion: item.description, linea: item.linea || null, cantidad: item.quantity, precio_unitario: item.unit_value, subtotal_venta: item.line_total, costo_unitario: item.linea === "UV" ? uvC.costo_unitario : null, subtotal_costo: item.linea === "UV" ? uvC.subtotal_costo : null, product_id: item.product_id, variant_id: item.variant_id, catalog_item_id: item.catalog_item_id, specs: item.specs || {}, cost_breakdown: item.linea === "UV" ? uvC.cost_breakdown : [] }]);
+        if (ie) throw ie;
+        if (item.linea === "Sellos" && item.inventory_mode === "catalogo" && item.variant_id && norm(item.quantity) > 0) {
+          const { error: se } = await supabase.rpc("decrement_variant_stock", { p_variant_id: item.variant_id, p_quantity: norm(item.quantity) });
+          if (se) throw se;
         }
       }
-
       alert("Orden guardada correctamente");
-      setPreviewData(null);
-      setFile(null);
-      setPriority("media");
-
-      const fileInput = document.getElementById("pdf-upload-input");
-      if (fileInput) fileInput.value = "";
-    } catch (error) {
-      console.error("Error guardando orden:", error);
-      alert(`Error guardando la orden: ${error.message}`);
-    } finally {
-      setLoading(false);
-    }
+      setPreview(null); setFile(null); setPriority("media");
+      const inp = document.getElementById("pdf-input"); if (inp) inp.value = "";
+    } catch (e) { alert(`Error: ${e.message}`); } finally { setLoading(false); }
   }
 
   return (
-    <div className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm md:p-8">
-      <h2 className="text-2xl font-bold text-slate-900">Nueva orden</h2>
-      <p className="mt-2 text-sm text-slate-500">
-        Sube el PDF, corrige la extracción y agrega o elimina items si hace falta.
-      </p>
-
-      <div className="mt-8 grid gap-6 md:grid-cols-2">
+    <div style={S.page}>
+      {/* Hero */}
+      <div style={S.hero}>
         <div>
-          <label className="mb-2 block text-sm font-medium text-slate-700">
-            PDF de la orden
-          </label>
-          <input
-            id="pdf-upload-input"
-            type="file"
-            accept="application/pdf"
-            onChange={(e) => setFile(e.target.files?.[0] || null)}
-            className="block w-full rounded-xl border border-slate-300 bg-white px-4 py-3 text-sm text-slate-700"
-          />
+          <div style={S.heroLabel}>NUEVA ORDEN</div>
+          <h2 style={S.heroTitle}>Crear orden</h2>
+          <p style={S.heroSub}>Sube el PDF, revisa los datos extraídos y configura cada ítem por línea de producción</p>
         </div>
-
-        <div>
-          <label className="mb-2 block text-sm font-medium text-slate-700">
-            Prioridad
-          </label>
-          <select
-            value={priority}
-            onChange={(e) => setPriority(e.target.value)}
-            className="block w-full rounded-xl border border-slate-300 bg-white px-4 py-3 text-sm text-slate-700 outline-none focus:border-slate-500"
-          >
-            <option value="baja">Baja</option>
-            <option value="media">Media</option>
-            <option value="alta">Alta</option>
-          </select>
-        </div>
+        <div style={S.heroDecor}>+</div>
       </div>
 
-      <div className="mt-6 flex flex-wrap items-center gap-3">
-        <button
-          type="button"
-          onClick={handleUpload}
-          disabled={loading}
-          className="rounded-xl bg-slate-900 px-5 py-3 text-sm font-medium text-white transition hover:bg-slate-800 disabled:opacity-50"
-        >
-          {loading ? "Procesando..." : "Leer PDF"}
+      {/* Upload Card */}
+      <div style={S.card}>
+        <div style={S.cardTitle}>📄 Cargar PDF de cotización</div>
+        <div style={S.uploadGrid}>
+          <div style={S.uploadZone}>
+            <input id="pdf-input" type="file" accept="application/pdf" style={{ display: "none" }} onChange={e => setFile(e.target.files?.[0] || null)} />
+            <label htmlFor="pdf-input" style={S.uploadLabel}>
+              <span style={S.uploadIcon}>📁</span>
+              <span style={S.uploadText}>{file ? file.name : "Seleccionar PDF"}</span>
+              <span style={S.uploadHint}>{file ? "Click para cambiar" : "Click para explorar"}</span>
+            </label>
+          </div>
+          <div style={S.priorityWrap}>
+            <label style={S.fieldLabel}>PRIORIDAD</label>
+            <div style={S.priorityBtns}>
+              {["baja", "media", "alta"].map(p => (
+                <button key={p} onClick={() => setPriority(p)}
+                  style={{ ...S.priorityBtn, ...(priority === p ? S.priorityBtnActive(p) : {}) }}>
+                  {p === "baja" ? "🟢" : p === "media" ? "🟡" : "🔴"} {p.charAt(0).toUpperCase() + p.slice(1)}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+        <button onClick={handleUpload} disabled={loading || !file} style={{ ...S.btnPrimary, opacity: loading || !file ? 0.5 : 1 }}>
+          {loading ? "Procesando..." : "📖 Leer PDF y continuar"}
         </button>
-
-        {file && (
-          <p className="text-sm text-slate-500">
-            Archivo seleccionado: <span className="font-medium">{file.name}</span>
-          </p>
-        )}
       </div>
 
-      {previewData && (
-        <div className="mt-10 rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
-          <h3 className="text-xl font-semibold text-slate-900">Preview editable</h3>
-          <p className="mt-2 text-sm text-slate-500">
-            Revisa, corrige, elimina o agrega items antes de guardar.
-          </p>
-
-          <div className="mt-6 grid gap-4 md:grid-cols-2">
-            <div>
-              <label className="mb-2 block text-sm font-medium text-slate-700">
-                Número de orden
-              </label>
-              <input
-                value={previewData.order_number || ""}
-                onChange={(e) => updateField("order_number", e.target.value)}
-                className="w-full rounded-xl border border-slate-300 px-4 py-3 text-sm outline-none focus:border-slate-500"
-                placeholder="PUBLI00108"
-              />
-            </div>
-
-            <div>
-              <label className="mb-2 block text-sm font-medium text-slate-700">
-                Cliente
-              </label>
-              <input
-                value={previewData.client_name || ""}
-                onChange={(e) => updateField("client_name", e.target.value)}
-                className="w-full rounded-xl border border-slate-300 px-4 py-3 text-sm outline-none focus:border-slate-500"
-                placeholder="Nombre del cliente"
-              />
-            </div>
-
-            <div>
-              <label className="mb-2 block text-sm font-medium text-slate-700">
-                Teléfono
-              </label>
-              <input
-                value={previewData.phone || ""}
-                onChange={(e) => updateField("phone", e.target.value)}
-                className="w-full rounded-xl border border-slate-300 px-4 py-3 text-sm outline-none focus:border-slate-500"
-                placeholder="+593..."
-              />
-            </div>
-
-            <div>
-              <label className="mb-2 block text-sm font-medium text-slate-700">
-                Subtotal
-              </label>
-              <input
-                type="number"
-                step="0.01"
-                value={previewData.subtotal || 0}
-                onChange={(e) => updateField("subtotal", Number(e.target.value))}
-                className="w-full rounded-xl border border-slate-300 px-4 py-3 text-sm outline-none focus:border-slate-500"
-              />
-            </div>
-
-            <div className="md:col-span-2">
-              <label className="mb-2 block text-sm font-medium text-slate-700">
-                Descripción de la orden
-              </label>
-              <textarea
-                value={previewData.descripcion_orden || ""}
-                onChange={(e) => updateDescripcionOrden(e.target.value)}
-                rows={3}
-                className="w-full rounded-xl border border-slate-300 px-4 py-3 text-sm outline-none focus:border-slate-500"
-                placeholder="Descripción operativa resumida"
-              />
+      {/* Preview */}
+      {preview && (
+        <div style={S.card}>
+          <div style={S.cardTitle}>✏️ Datos de la orden</div>
+          <div style={S.formGrid}>
+            <Field label="Número de orden" value={preview.order_number || ""} onChange={v => upd("order_number", v)} placeholder="PUBLI00108" />
+            <Field label="Cliente" value={preview.client_name || ""} onChange={v => upd("client_name", v)} placeholder="Nombre del cliente" />
+            <Field label="Teléfono" value={preview.phone || ""} onChange={v => upd("phone", v)} placeholder="+593..." />
+            <Field label="Subtotal ($)" value={preview.subtotal || 0} onChange={v => upd("subtotal", Number(v))} type="number" />
+            <div style={{ gridColumn: "1 / -1" }}>
+              <label style={S.fieldLabel}>DESCRIPCIÓN DE LA ORDEN</label>
+              <textarea value={preview.descripcion_orden || ""} onChange={e => updDesc(e.target.value)} rows={3} placeholder="Descripción operativa resumida..."
+                style={{ ...S.input, resize: "vertical", minHeight: "80px" }} />
             </div>
           </div>
 
-          <div className="mt-8">
-            <div className="mb-3 flex items-center justify-between">
-              <h4 className="text-base font-semibold text-slate-900">Items</h4>
-              <div className="flex flex-wrap gap-2">
-                <button
-                  type="button"
-                  onClick={addManualItem}
-                  className="rounded-xl bg-emerald-100 px-3 py-2 text-xs font-medium text-emerald-700 hover:bg-emerald-200"
-                >
-                  + Agregar item
-                </button>
-                <button
-                  type="button"
-                  onClick={recalculateSubtotalFromItems}
-                  className="rounded-xl bg-slate-100 px-3 py-2 text-xs font-medium text-slate-700 hover:bg-slate-200"
-                >
-                  Recalcular subtotal
-                </button>
+          {/* Items */}
+          <div style={{ marginTop: "28px" }}>
+            <div style={S.itemsHeader}>
+              <div style={S.cardTitle} >📦 Ítems de producción</div>
+              <div style={{ display: "flex", gap: "8px" }}>
+                <button onClick={recalc} style={S.btnSecondary}>↺ Recalcular subtotal</button>
+                <button onClick={addItem} style={S.btnSuccess}>+ Agregar ítem</button>
               </div>
             </div>
 
-            <div className="space-y-4">
-              {previewData.items?.map((item, index) => {
-                const variantsForSelectedProduct = item.product_id
-                  ? getVariantsForProduct(item.product_id)
-                  : [];
-                const isSellos = item.linea === "Sellos";
-                const isCatalogMode = item.inventory_mode === "catalogo";
-                const isOtrosMode = item.inventory_mode === "otros";
-                const isUV = item.linea === "UV";
-                const selectedUvCatalogItem = item.catalog_item_id
-                  ? getUvCatalogItemById(item.catalog_item_id)
-                  : null;
-                const uvAttributesForSelectedItem = item.catalog_item_id
-                  ? getUvAttributesForItem(item.catalog_item_id)
-                  : [];
-
-                return (
-                  <div
-                    key={index}
-                    className="rounded-2xl border border-slate-200 bg-slate-50 p-4"
-                  >
-                    <div className="mb-4 flex items-center justify-between gap-3">
-                      <h5 className="text-sm font-semibold text-slate-900">
-                        Item #{index + 1}
-                      </h5>
-                      <button
-                        type="button"
-                        onClick={() => removeItem(index)}
-                        className="rounded-xl bg-red-100 px-3 py-2 text-xs font-medium text-red-700 hover:bg-red-200"
-                      >
-                        Eliminar item
-                      </button>
-                    </div>
-
-                    <div className="grid gap-4 md:grid-cols-2">
-                      <div className="md:col-span-2">
-                        <label className="mb-2 block text-sm font-medium text-slate-700">
-                          Descripción del item
-                        </label>
-                        <input
-                          value={item.description || ""}
-                          onChange={(e) => updateItem(index, "description", e.target.value)}
-                          className="w-full rounded-xl border border-slate-300 px-4 py-3 text-sm outline-none focus:border-slate-500"
-                          placeholder="Descripción del producto o servicio"
-                        />
-                      </div>
-
-                      <div>
-                        <label className="mb-2 block text-sm font-medium text-slate-700">
-                          Cantidad
-                        </label>
-                        <input
-                          type="number"
-                          value={item.quantity || 0}
-                          onChange={(e) => updateItem(index, "quantity", e.target.value)}
-                          className="w-full rounded-xl border border-slate-300 px-4 py-3 text-sm outline-none focus:border-slate-500"
-                        />
-                      </div>
-
-                      <div>
-                        <label className="mb-2 block text-sm font-medium text-slate-700">
-                          Línea
-                        </label>
-                        <select
-                          value={item.linea || ""}
-                          onChange={(e) => updateItemLinea(index, e.target.value)}
-                          className="w-full rounded-xl border border-slate-300 bg-white px-4 py-3 text-sm outline-none focus:border-slate-500"
-                        >
-                          {lineasOptions.map((linea) => (
-                            <option key={linea} value={linea}>
-                              {linea === "" ? "Seleccionar línea" : linea}
-                            </option>
-                          ))}
-                        </select>
-                      </div>
-
-                      <div>
-                        <label className="mb-2 block text-sm font-medium text-slate-700">
-                          Valor unitario
-                        </label>
-                        <input
-                          type="number"
-                          step="0.01"
-                          value={item.unit_value || 0}
-                          onChange={(e) => updateItem(index, "unit_value", e.target.value)}
-                          className="w-full rounded-xl border border-slate-300 px-4 py-3 text-sm outline-none focus:border-slate-500"
-                        />
-                      </div>
-
-                      <div>
-                        <label className="mb-2 block text-sm font-medium text-slate-700">
-                          Subtotal del item
-                        </label>
-                        <input
-                          type="number"
-                          step="0.01"
-                          value={item.line_total || 0}
-                          onChange={(e) => updateItem(index, "line_total", e.target.value)}
-                          className="w-full rounded-xl border border-slate-300 px-4 py-3 text-sm outline-none focus:border-slate-500"
-                        />
-                      </div>
-                    </div>
-
-                    {isSellos && (
-                      <div className="mt-5 rounded-2xl border border-slate-200 bg-white p-4">
-                        <h5 className="text-sm font-semibold text-slate-900">
-                          Configuración de Sellos
-                        </h5>
-
-                        <div className="mt-4 grid gap-4 md:grid-cols-2">
-                          <div>
-                            <label className="mb-2 block text-sm font-medium text-slate-700">
-                              Tipo
-                            </label>
-                            <select
-                              value={item.inventory_mode || "catalogo"}
-                              onChange={(e) => updateSellosMode(index, e.target.value)}
-                              className="w-full rounded-xl border border-slate-300 bg-white px-4 py-3 text-sm outline-none focus:border-slate-500"
-                            >
-                              <option value="catalogo">Catálogo</option>
-                              <option value="otros">Otros</option>
-                            </select>
-                          </div>
-
-                          <div>
-                            <label className="mb-2 block text-sm font-medium text-slate-700">
-                              Color de tinta
-                            </label>
-                            <select
-                              value={item.specs?.tinta || ""}
-                              onChange={(e) => updateItemSpecs(index, "tinta", e.target.value)}
-                              className="w-full rounded-xl border border-slate-300 bg-white px-4 py-3 text-sm outline-none focus:border-slate-500"
-                            >
-                              {tintaOptions.map((tinta) => (
-                                <option key={tinta} value={tinta}>
-                                  {tinta === "" ? "Seleccionar tinta" : tinta}
-                                </option>
-                              ))}
-                            </select>
-                          </div>
-
-                          <div className="md:col-span-2">
-                            <label className="mb-2 block text-sm font-medium text-slate-700">
-                              UV en carcasa
-                            </label>
-                            <div className="flex items-center gap-3">
-                              <button
-                                type="button"
-                                onClick={() => updateItemSpecs(index, "uv", true)}
-                                className={`rounded-xl px-4 py-2 text-sm font-medium ${
-                                  item.specs?.uv
-                                    ? "bg-slate-900 text-white"
-                                    : "bg-slate-100 text-slate-700"
-                                }`}
-                              >
-                                Sí
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => updateItemSpecs(index, "uv", false)}
-                                className={`rounded-xl px-4 py-2 text-sm font-medium ${
-                                  item.specs?.uv === false
-                                    ? "bg-slate-900 text-white"
-                                    : "bg-slate-100 text-slate-700"
-                                }`}
-                              >
-                                No
-                              </button>
-                            </div>
-                          </div>
-
-                          {isCatalogMode && (
-                            <>
-                              <div>
-                                <label className="mb-2 block text-sm font-medium text-slate-700">
-                                  Modelo
-                                </label>
-                                <select
-                                  value={item.product_id || ""}
-                                  onChange={(e) => updateSellosProduct(index, e.target.value)}
-                                  className="w-full rounded-xl border border-slate-300 bg-white px-4 py-3 text-sm outline-none focus:border-slate-500"
-                                >
-                                  <option value="">Seleccionar modelo</option>
-                                  {sellosProducts
-                                    .filter((p) => p.nombre !== "Otros")
-                                    .map((product) => (
-                                      <option key={product.id} value={product.id}>
-                                        {product.nombre}
-                                      </option>
-                                    ))}
-                                </select>
-                              </div>
-
-                              <div>
-                                <label className="mb-2 block text-sm font-medium text-slate-700">
-                                  Variante
-                                </label>
-                                <select
-                                  value={item.variant_id || ""}
-                                  onChange={(e) => updateSellosVariant(index, e.target.value)}
-                                  disabled={!item.product_id}
-                                  className="w-full rounded-xl border border-slate-300 bg-white px-4 py-3 text-sm outline-none focus:border-slate-500 disabled:bg-slate-100"
-                                >
-                                  <option value="">Seleccionar variante</option>
-                                  {variantsForSelectedProduct.map((variant) => (
-                                    <option key={variant.id} value={variant.id}>
-                                      {variant.nombre}
-                                    </option>
-                                  ))}
-                                </select>
-                              </div>
-                            </>
-                          )}
-
-                          {isOtrosMode && (
-                            <div className="md:col-span-2 rounded-xl bg-amber-50 px-4 py-3 text-sm text-amber-700">
-                              Este item se marcará como <strong>Otros</strong>, no
-                              descontará stock por ahora, pero sí quedará guardado para
-                              producción y finanzas.
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                    )}
-
-                    {isUV && (
-                      <div className="mt-5 rounded-2xl border border-slate-200 bg-white p-4">
-                        <h5 className="text-sm font-semibold text-slate-900">
-                          Configuración de UV
-                        </h5>
-
-                        <div className="mt-4 grid gap-4 md:grid-cols-2">
-                          <div className="md:col-span-2">
-                            <label className="mb-2 block text-sm font-medium text-slate-700">
-                              Tipo UV
-                            </label>
-                            <select
-                              value={item.catalog_item_id || ""}
-                              onChange={(e) => updateUvCatalogItem(index, e.target.value)}
-                              className="w-full rounded-xl border border-slate-300 bg-white px-4 py-3 text-sm outline-none focus:border-slate-500"
-                            >
-                              <option value="">Seleccionar tipo UV</option>
-                              {uvCatalogItems.map((catalogItem) => (
-                                <option key={catalogItem.id} value={catalogItem.id}>
-                                  {catalogItem.nombre}
-                                </option>
-                              ))}
-                            </select>
-                          </div>
-
-                          {selectedUvCatalogItem && (
-                            <div className="md:col-span-2 rounded-xl bg-slate-50 px-4 py-3 text-sm text-slate-600">
-                              {selectedUvCatalogItem.slug === "uv-textil" && (
-                                <span>
-                                  UV Textil se calculará internamente por metros cuadrados.
-                                </span>
-                              )}
-                              {selectedUvCatalogItem.slug === "uv-dtf" && (
-                                <span>
-                                  UV DTF se calculará internamente por formato equivalente de
-                                  plancha A3.
-                                </span>
-                              )}
-                            </div>
-                          )}
-
-                          {uvAttributesForSelectedItem.map((attribute) =>
-                            renderDynamicAttribute(index, item, attribute)
-                          )}
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
-
-              {(!previewData.items || previewData.items.length === 0) && (
-                <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-6 text-center text-sm text-slate-400">
-                  No hay items. Agrega uno manualmente.
+            <div style={{ display: "flex", flexDirection: "column", gap: "16px", marginTop: "16px" }}>
+              {(preview.items || []).map((item, idx) => (
+                <ItemCard
+                  key={idx} item={item} idx={idx}
+                  onUpdate={(f, v) => updItem(idx, f, v)}
+                  onUpdateSpecs={(k, v) => updSpecs(idx, k, v)}
+                  onUpdateLinea={v => updLinea(idx, v)}
+                  onUpdateUvItem={id => updUvItem(idx, id)}
+                  onUpdateSellosProduct={id => setPreview(p => { const items = [...p.items]; items[idx] = { ...items[idx], product_id: id || null, variant_id: null }; return { ...p, items }; })}
+                  onUpdateSellosVariant={id => setPreview(p => { const items = [...p.items]; items[idx] = { ...items[idx], variant_id: id || null }; return { ...p, items }; })}
+                  onUpdateSellosMode={mode => setPreview(p => { const items = [...p.items]; items[idx] = { ...items[idx], inventory_mode: mode, product_id: null, variant_id: null }; return { ...p, items }; })}
+                  onRemove={() => removeItem(idx)}
+                  sellosProducts={sellosProducts}
+                  variants={variants}
+                  uvItems={uvItems}
+                  uvAttrs={uvAttrs}
+                />
+              ))}
+              {(!preview.items || preview.items.length === 0) && (
+                <div style={S.emptyItems}>
+                  <span style={{ fontSize: "32px" }}>📋</span>
+                  <p style={{ color: "#94a3b8", margin: 0 }}>No hay ítems. Agrega uno manualmente o carga un PDF.</p>
                 </div>
               )}
             </div>
           </div>
 
-          <div className="mt-8 flex flex-wrap items-center justify-end gap-3">
-            <button
-              type="button"
-              onClick={guardarOrden}
-              disabled={loading}
-              className="rounded-xl bg-slate-900 px-5 py-3 text-sm font-medium text-white transition hover:bg-slate-800 disabled:opacity-50"
-            >
-              {loading ? "Guardando..." : "Guardar orden"}
-            </button>
+          <div style={{ display: "flex", justifyContent: "flex-end", marginTop: "24px", borderTop: "1px solid #e2e8f0", paddingTop: "20px" }}>
+            <div style={{ textAlign: "right" }}>
+              <p style={{ fontSize: "13px", color: "#94a3b8", margin: "0 0 4px" }}>Total de la orden</p>
+              <p style={{ fontSize: "28px", fontWeight: 800, color: "#1e293b", margin: "0 0 16px", letterSpacing: "-1px" }}>${Number(preview.subtotal || 0).toFixed(2)}</p>
+              <button onClick={guardar} disabled={loading} style={{ ...S.btnPrimary, opacity: loading ? 0.5 : 1 }}>
+                {loading ? "Guardando..." : "💾 Guardar orden"}
+              </button>
+            </div>
           </div>
         </div>
       )}
     </div>
   );
 }
+
+function ItemCard({ item, idx, onUpdate, onUpdateSpecs, onUpdateLinea, onUpdateUvItem, onUpdateSellosProduct, onUpdateSellosVariant, onUpdateSellosMode, onRemove, sellosProducts, variants, uvItems, uvAttrs }) {
+  const meta = LINE_META[item.linea];
+  const variantsForProduct = item.product_id ? variants.filter(v => v.product_id === item.product_id) : [];
+  const selectedUvItem = item.catalog_item_id ? uvItems.find(x => x.id === item.catalog_item_id) : null;
+  const attrsForUvItem = item.catalog_item_id ? uvAttrs.filter(a => a.item_id === item.catalog_item_id) : [];
+
+  return (
+    <div style={S.itemCard}>
+      {/* Item header */}
+      <div style={S.itemHeader}>
+        <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+          <div style={S.itemNum}>#{idx + 1}</div>
+          {meta && <div style={{ ...S.itemLineBadge, background: meta.bg, color: meta.color }}>{meta.icon} {item.linea}</div>}
+        </div>
+        <button onClick={onRemove} style={S.btnDanger}>✕ Eliminar</button>
+      </div>
+
+      {/* Base fields */}
+      <div style={S.formGrid}>
+        <div style={{ gridColumn: "1 / -1" }}>
+          <Field label="Descripción del ítem" value={item.description} onChange={v => onUpdate("description", v)} placeholder="Descripción del producto o servicio" />
+        </div>
+        <Field label="Cantidad" value={item.quantity} onChange={v => onUpdate("quantity", v)} type="number" />
+        <Field label="Valor unitario ($)" value={item.unit_value} onChange={v => onUpdate("unit_value", v)} type="number" step="0.01" />
+        <Field label="Subtotal ($)" value={item.line_total} onChange={v => onUpdate("line_total", v)} type="number" step="0.01" />
+
+        {/* Linea selector */}
+        <div>
+          <label style={S.fieldLabel}>LÍNEA DE PRODUCCIÓN</label>
+          <div style={S.lineaGrid}>
+            {LINEAS.filter(l => l !== "").map(linea => {
+              const m = LINE_META[linea];
+              const active = item.linea === linea;
+              return (
+                <button key={linea} onClick={() => onUpdateLinea(linea)}
+                  style={{ ...S.lineaBtn, ...(active ? { background: m.bg, borderColor: m.color, color: m.color } : {}) }}>
+                  <span style={{ fontSize: "18px" }}>{m.icon}</span>
+                  <span style={{ fontSize: "12px", fontWeight: 600 }}>{linea}</span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      </div>
+
+      {/* Línea-specific config */}
+      {item.linea === "Sellos" && (
+        <div style={{ ...S.lineConfig, borderColor: "#6366f1", background: "#eef2ff" }}>
+          <div style={{ ...S.lineConfigTitle, color: "#6366f1" }}>🔖 Configuración de Sellos</div>
+          <div style={S.formGrid}>
+            <div>
+              <label style={S.fieldLabel}>TIPO</label>
+              <select value={item.inventory_mode} onChange={e => onUpdateSellosMode(e.target.value)} style={S.select}>
+                <option value="catalogo">Catálogo</option>
+                <option value="otros">Otros</option>
+              </select>
+            </div>
+            <div>
+              <label style={S.fieldLabel}>COLOR DE TINTA</label>
+              <select value={item.specs?.tinta || ""} onChange={e => onUpdateSpecs("tinta", e.target.value)} style={S.select}>
+                {TINTAS.map(t => <option key={t} value={t}>{t || "Seleccionar tinta"}</option>)}
+              </select>
+            </div>
+            <div>
+              <label style={S.fieldLabel}>UV EN CARCASA</label>
+              <div style={S.toggleRow}>
+                {[true, false].map(v => (
+                  <button key={String(v)} onClick={() => onUpdateSpecs("uv", v)}
+                    style={{ ...S.toggleBtn, ...(item.specs?.uv === v ? S.toggleBtnOn : {}) }}>
+                    {v ? "Sí" : "No"}
+                  </button>
+                ))}
+              </div>
+            </div>
+            {item.inventory_mode === "catalogo" && (
+              <>
+                <div>
+                  <label style={S.fieldLabel}>MODELO</label>
+                  <select value={item.product_id || ""} onChange={e => onUpdateSellosProduct(e.target.value)} style={S.select}>
+                    <option value="">Seleccionar modelo</option>
+                    {sellosProducts.filter(p => p.nombre !== "Otros").map(p => <option key={p.id} value={p.id}>{p.nombre}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label style={S.fieldLabel}>VARIANTE</label>
+                  <select value={item.variant_id || ""} onChange={e => onUpdateSellosVariant(e.target.value)} disabled={!item.product_id} style={{ ...S.select, opacity: !item.product_id ? 0.5 : 1 }}>
+                    <option value="">Seleccionar variante</option>
+                    {variantsForProduct.map(v => <option key={v.id} value={v.id}>{v.nombre}</option>)}
+                  </select>
+                </div>
+              </>
+            )}
+            {item.inventory_mode === "otros" && (
+              <div style={{ gridColumn: "1 / -1", background: "#fffbeb", border: "1px solid #fde68a", borderRadius: "10px", padding: "12px 16px", fontSize: "13px", color: "#92400e" }}>
+                ⚠ Este ítem se marcará como <strong>Otros</strong>. No descontará stock, pero quedará registrado para producción y finanzas.
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {item.linea === "UV" && (
+        <div style={{ ...S.lineConfig, borderColor: "#f59e0b", background: "#fffbeb" }}>
+          <div style={{ ...S.lineConfigTitle, color: "#d97706" }}>🔆 Configuración UV</div>
+          <div style={S.formGrid}>
+            <div style={{ gridColumn: "1 / -1" }}>
+              <label style={S.fieldLabel}>TIPO UV</label>
+              <div style={S.uvTypeBtns}>
+                {uvItems.map(ci => (
+                  <button key={ci.id} onClick={() => onUpdateUvItem(ci.id)}
+                    style={{ ...S.uvTypeBtn, ...(item.catalog_item_id === ci.id ? S.uvTypeBtnOn : {}) }}>
+                    <span style={{ fontSize: "20px" }}>{ci.slug === "uv-textil" ? "🧵" : "🖨️"}</span>
+                    <span style={{ fontSize: "13px", fontWeight: 600 }}>{ci.nombre}</span>
+                    <span style={{ fontSize: "11px", color: item.catalog_item_id === ci.id ? "#d97706" : "#94a3b8" }}>
+                      {ci.slug === "uv-textil" ? "Por m²" : "Por plancha A3"}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            </div>
+            {selectedUvItem && attrsForUvItem.map(attr => {
+              const val = item.specs?.[attr.attribute_key];
+              const opts = Array.isArray(attr.options) ? attr.options : [];
+              if (attr.attribute_key === "equivalente") {
+                const eq = norm(item.specs?.equivalente) || uvEquiv(item.specs);
+                return (
+                  <div key={attr.id}>
+                    <label style={S.fieldLabel}>{attr.label.toUpperCase()}</label>
+                    <input type="number" step="0.001" value={eq} readOnly style={{ ...S.input, background: "#f1f5f9", color: "#64748b" }} />
+                  </div>
+                );
+              }
+              if (attr.field_type === "select") return (
+                <div key={attr.id} style={attr.attribute_key === "observacion_tecnica" ? { gridColumn: "1 / -1" } : {}}>
+                  <label style={S.fieldLabel}>{attr.label.toUpperCase()}</label>
+                  <select value={val || ""} onChange={e => onUpdateSpecs(attr.attribute_key, e.target.value)} style={S.select}>
+                    <option value="">Seleccionar {attr.label.toLowerCase()}</option>
+                    {opts.map(o => <option key={o} value={o}>{o}</option>)}
+                  </select>
+                </div>
+              );
+              if (attr.field_type === "number") return (
+                <div key={attr.id}>
+                  <label style={S.fieldLabel}>{attr.label.toUpperCase()}</label>
+                  <input type="number" step="0.01" value={val || 0} onChange={e => onUpdateSpecs(attr.attribute_key, Number(e.target.value))} style={S.input} />
+                </div>
+              );
+              if (attr.field_type === "boolean") return (
+                <div key={attr.id}>
+                  <label style={S.fieldLabel}>{attr.label.toUpperCase()}</label>
+                  <div style={S.toggleRow}>
+                    {[true, false].map(v => <button key={String(v)} onClick={() => onUpdateSpecs(attr.attribute_key, v)} style={{ ...S.toggleBtn, ...(val === v ? S.toggleBtnOn : {}) }}>{v ? "Sí" : "No"}</button>)}
+                  </div>
+                </div>
+              );
+              return (
+                <div key={attr.id} style={attr.attribute_key === "observacion_tecnica" ? { gridColumn: "1 / -1" } : {}}>
+                  <label style={S.fieldLabel}>{attr.label.toUpperCase()}</label>
+                  <input value={val || ""} onChange={e => onUpdateSpecs(attr.attribute_key, e.target.value)} style={S.input} placeholder={attr.label} />
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Field({ label, value, onChange, type = "text", placeholder = "", step }) {
+  return (
+    <div>
+      <label style={S.fieldLabel}>{label.toUpperCase()}</label>
+      <input type={type} value={value} step={step} placeholder={placeholder} onChange={e => onChange(e.target.value)} style={S.input} />
+    </div>
+  );
+}
+
+const S = {
+  page: { display: "flex", flexDirection: "column", gap: "24px", fontFamily: "'DM Sans', 'Segoe UI', sans-serif", color: "#1e293b" },
+  restricted: { display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "80px", gap: "12px", background: "white", borderRadius: "20px", border: "1px solid #e2e8f0" },
+  hero: { background: "linear-gradient(135deg, #0f172a 0%, #134e4a 100%)", borderRadius: "20px", padding: "36px", color: "white", position: "relative", overflow: "hidden" },
+  heroLabel: { fontSize: "10px", fontWeight: 700, letterSpacing: "3px", color: "#5eead4", marginBottom: "8px" },
+  heroTitle: { fontSize: "36px", fontWeight: 800, margin: 0, letterSpacing: "-1.5px" },
+  heroSub: { fontSize: "14px", color: "#94a3b8", marginTop: "8px", maxWidth: "480px" },
+  heroDecor: { position: "absolute", right: "50px", top: "50%", transform: "translateY(-50%)", fontSize: "140px", fontWeight: 900, color: "rgba(94,234,212,0.1)", lineHeight: 1 },
+  card: { background: "white", borderRadius: "20px", border: "1px solid #e2e8f0", padding: "28px" },
+  cardTitle: { fontSize: "16px", fontWeight: 700, color: "#1e293b", margin: "0 0 20px" },
+  uploadGrid: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "20px", marginBottom: "20px" },
+  uploadZone: { border: "2px dashed #e2e8f0", borderRadius: "14px", overflow: "hidden" },
+  uploadLabel: { display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "32px", cursor: "pointer", gap: "8px" },
+  uploadIcon: { fontSize: "32px" },
+  uploadText: { fontSize: "14px", fontWeight: 600, color: "#1e293b" },
+  uploadHint: { fontSize: "12px", color: "#94a3b8" },
+  priorityWrap: { display: "flex", flexDirection: "column", gap: "10px" },
+  priorityBtns: { display: "flex", flexDirection: "column", gap: "8px" },
+  priorityBtn: { display: "flex", alignItems: "center", gap: "8px", padding: "12px 16px", borderRadius: "12px", border: "1.5px solid #e2e8f0", background: "white", fontSize: "14px", fontWeight: 500, color: "#64748b", cursor: "pointer", fontFamily: "inherit" },
+  priorityBtnActive: (p) => ({ background: p === "alta" ? "#fee2e2" : p === "media" ? "#fefce8" : "#f0fdf4", borderColor: p === "alta" ? "#f87171" : p === "media" ? "#fbbf24" : "#4ade80", color: p === "alta" ? "#dc2626" : p === "media" ? "#d97706" : "#16a34a", fontWeight: 700 }),
+  formGrid: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: "16px" },
+  fieldLabel: { display: "block", fontSize: "10px", fontWeight: 700, color: "#94a3b8", letterSpacing: "1px", marginBottom: "6px" },
+  input: { width: "100%", padding: "11px 14px", borderRadius: "12px", border: "1.5px solid #e2e8f0", fontSize: "14px", outline: "none", fontFamily: "inherit", boxSizing: "border-box", transition: "border-color 0.15s" },
+  select: { width: "100%", padding: "11px 14px", borderRadius: "12px", border: "1.5px solid #e2e8f0", fontSize: "14px", outline: "none", fontFamily: "inherit", background: "white" },
+  itemsHeader: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "4px" },
+  itemCard: { border: "1.5px solid #e2e8f0", borderRadius: "16px", overflow: "hidden" },
+  itemHeader: { display: "flex", alignItems: "center", justifyContent: "space-between", padding: "14px 20px", background: "#f8fafc", borderBottom: "1px solid #e2e8f0" },
+  itemNum: { width: "28px", height: "28px", background: "#1e293b", color: "white", borderRadius: "8px", display: "flex", alignItems: "center", justifyContent: "center", fontSize: "12px", fontWeight: 800 },
+  itemLineBadge: { padding: "5px 12px", borderRadius: "40px", fontSize: "12px", fontWeight: 700 },
+  lineaGrid: { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(90px, 1fr))", gap: "8px", gridColumn: "1 / -1" },
+  lineaBtn: { display: "flex", flexDirection: "column", alignItems: "center", gap: "4px", padding: "10px 8px", borderRadius: "12px", border: "1.5px solid #e2e8f0", background: "white", cursor: "pointer", fontFamily: "inherit", transition: "all 0.15s" },
+  lineConfig: { margin: "0 20px 20px", borderRadius: "14px", border: "1.5px solid", padding: "16px" },
+  lineConfigTitle: { fontSize: "14px", fontWeight: 700, marginBottom: "16px" },
+  toggleRow: { display: "flex", gap: "8px" },
+  toggleBtn: { padding: "9px 20px", borderRadius: "10px", border: "1.5px solid #e2e8f0", background: "white", fontSize: "13px", fontWeight: 600, cursor: "pointer", fontFamily: "inherit" },
+  toggleBtnOn: { background: "#1e293b", color: "white", borderColor: "#1e293b" },
+  uvTypeBtns: { display: "flex", gap: "12px" },
+  uvTypeBtn: { flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: "4px", padding: "16px", borderRadius: "14px", border: "1.5px solid #e2e8f0", background: "white", cursor: "pointer", fontFamily: "inherit" },
+  uvTypeBtnOn: { background: "#fffbeb", borderColor: "#f59e0b" },
+  emptyItems: { display: "flex", flexDirection: "column", alignItems: "center", gap: "12px", padding: "48px", border: "2px dashed #e2e8f0", borderRadius: "14px" },
+  btnPrimary: { display: "inline-flex", alignItems: "center", gap: "8px", padding: "12px 24px", borderRadius: "12px", background: "#0f172a", color: "white", border: "none", fontSize: "14px", fontWeight: 700, cursor: "pointer", fontFamily: "inherit" },
+  btnSecondary: { padding: "9px 16px", borderRadius: "10px", background: "white", color: "#64748b", border: "1.5px solid #e2e8f0", fontSize: "13px", fontWeight: 600, cursor: "pointer", fontFamily: "inherit" },
+  btnSuccess: { padding: "9px 16px", borderRadius: "10px", background: "#f0fdf4", color: "#16a34a", border: "1.5px solid #4ade80", fontSize: "13px", fontWeight: 600, cursor: "pointer", fontFamily: "inherit" },
+  btnDanger: { padding: "7px 14px", borderRadius: "10px", background: "#fff1f2", color: "#dc2626", border: "1.5px solid #fecaca", fontSize: "12px", fontWeight: 600, cursor: "pointer", fontFamily: "inherit" },
+};
