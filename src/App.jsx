@@ -59,7 +59,7 @@ export default function App() {
       {profile && view === "clientes"   && <Clients />}
       {profile && view === "inventario" && <Inventory />}
       {profile && view === "finanzas"   && <Finance />}
-      {profile && view === "dashboard" && <Dashboard />}
+
     </Layout>
   );
 }
