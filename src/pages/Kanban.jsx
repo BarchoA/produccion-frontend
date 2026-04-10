@@ -26,17 +26,17 @@ function collisionStrategy(args) {
 
 export default function Kanban() {
   const { profile } = useAuth();
-  const [orders, setOrders]               = useState([]);
-  const [activeOrder, setActiveOrder]     = useState(null);
+  const [orders,        setOrders]        = useState([]);
+  const [activeOrder,   setActiveOrder]   = useState(null);
   const [selectedOrder, setSelectedOrder] = useState(null);
-  const [search, setSearch]               = useState("");
-  const [filterLinea, setFilterLinea]     = useState("Todas");
-  const [filterPrio, setFilterPrio]       = useState("Todas");
-  const [loading, setLoading]             = useState(true);
+  const [search,        setSearch]        = useState("");
+  const [filterLinea,   setFilterLinea]   = useState("Todas");
+  const [filterPrio,    setFilterPrio]    = useState("Todas");
+  const [loading,       setLoading]       = useState(true);
 
-  const isAdmin   = profile?.rol === "admin";
+  const isAdmin    = profile?.rol === "admin";
   const isOperario = profile?.rol === "operario";
-  const canDrag   = isAdmin || isOperario;
+  const canDrag    = isAdmin || isOperario;
 
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 4 } })
@@ -56,28 +56,26 @@ export default function Kanban() {
     const { data, error } = await supabase
       .from("orders")
       .select("*")
+      .in("estado", ESTADOS)
       .order("fecha_creacion", { ascending: true });
     if (!error) setOrders(data || []);
     setLoading(false);
   }
 
-  // Líneas disponibles para filtro
   const availableLineas = useMemo(() => {
     const ls = new Set();
     orders.forEach(o => (o.data_json?.items || []).forEach(i => i.linea && ls.add(i.linea)));
     return ["Todas", ...Array.from(ls).sort()];
   }, [orders]);
 
-  // Filtrado
   const filteredOrders = useMemo(() => {
     return orders.filter(o => {
-      const items  = o.data_json?.items || [];
+      const items   = o.data_json?.items || [];
       const cliente = (o.data_json?.cliente?.nombre || "").toLowerCase();
       const num     = (o.data_json?.order_number || "").toLowerCase();
       const term    = search.trim().toLowerCase();
-
       if (term && !cliente.includes(term) && !num.includes(term)) return false;
-      if (filterPrio !== "Todas" && o.prioridad !== filterPrio) return false;
+      if (filterPrio  !== "Todas" && o.prioridad !== filterPrio) return false;
       if (filterLinea !== "Todas" && !items.some(i => i.linea === filterLinea)) return false;
       return true;
     });
@@ -89,14 +87,13 @@ export default function Kanban() {
     return g;
   }, [filteredOrders]);
 
-  // Stats globales
-  const stats = useMemo(() => {
-    const total = orders.length;
-    const enProd = orders.filter(o => o.estado === "En Producción").length;
-    const sinDiseno = orders.filter(o => !o.design_url && o.estado !== "Enviado").length;
-    const alta = orders.filter(o => o.prioridad === "alta" && o.estado !== "Enviado").length;
-    return { total, enProd, sinDiseno, alta };
-  }, [orders]);
+  const stats = useMemo(() => ({
+    total:       orders.length,
+    enProd:      orders.filter(o => o.estado === "En Producción").length,
+    sinDiseno:   orders.filter(o => !o.design_url).length,
+    alta:        orders.filter(o => o.prioridad === "alta").length,
+    sinTracking: orders.filter(o => o.estado === "Enviado" && !o.tracking_url).length,
+  }), [orders]);
 
   function findById(id) { return orders.find(o => o.id === id); }
 
@@ -134,23 +131,23 @@ export default function Kanban() {
   }
 
   const handleUploadDesign = (id, f) => subirArchivo(id, f, "designs", "design_url");
-  const handleUploadGuide  = (id, f) => subirArchivo(id, f, "guides", "shipping_guide_url");
+  const handleUploadGuide  = (id, f) => subirArchivo(id, f, "guides",  "shipping_guide_url");
 
   return (
     <div style={S.page}>
-      {/* Header */}
+
+      {/* Hero */}
       <div style={S.hero}>
-        <div style={S.heroContent}>
+        <div>
           <div style={S.heroLabel}>TABLERO DE PRODUCCIÓN</div>
           <h2 style={S.heroTitle}>Kanban</h2>
-          <p style={S.heroSub}>Gestiona el estado de cada orden arrastrando las tarjetas entre columnas</p>
+          <p style={S.heroSub}>Gestiona el estado de cada orden · Las entregas confirmadas se archivan automáticamente</p>
         </div>
-        {/* Stats rápidas */}
         <div style={S.heroStats}>
-          <HeroStat num={stats.total}     label="Total órdenes"  color="#fff" />
-          <HeroStat num={stats.enProd}    label="En producción"  color="#fbbf24" />
-          <HeroStat num={stats.alta}      label="Alta prioridad" color="#f87171" />
-          <HeroStat num={stats.sinDiseno} label="Sin diseño"     color="#94a3b8" />
+          <HeroStat num={stats.total}       label="Activas"        color="#fff"    />
+          <HeroStat num={stats.enProd}      label="En producción"  color="#fbbf24" />
+          <HeroStat num={stats.alta}        label="Alta prioridad" color="#f87171" />
+          <HeroStat num={stats.sinTracking} label="Sin tracking"   color="#94a3b8" />
         </div>
       </div>
 
@@ -175,19 +172,19 @@ export default function Kanban() {
         <div style={S.filterGroup}>
           <span style={S.filterLabel}>Prioridad:</span>
           <select value={filterPrio} onChange={e => setFilterPrio(e.target.value)} style={S.filterSelect}>
-            {["Todas", "alta", "media", "baja"].map(p => <option key={p} value={p}>{p.charAt(0).toUpperCase() + p.slice(1)}</option>)}
+            {["Todas","alta","media","baja"].map(p => (
+              <option key={p} value={p}>{p.charAt(0).toUpperCase() + p.slice(1)}</option>
+            ))}
           </select>
         </div>
         <div style={S.rolBadge}>
-          <span style={S.rolDot(profile?.rol)} />
+          <span style={{ width: "8px", height: "8px", borderRadius: "50%", background: profile?.rol === "admin" ? "#10b981" : profile?.rol === "operario" ? "#f59e0b" : "#6366f1", flexShrink: 0 }} />
           {profile?.rol || "sin rol"}
         </div>
-        {!canDrag && (
-          <span style={S.readonlyChip}>👁 Solo lectura</span>
-        )}
+        {!canDrag && <span style={S.readonlyChip}>👁 Solo lectura</span>}
       </div>
 
-      {/* Progreso del pipeline */}
+      {/* Pipeline */}
       <div style={S.pipelineBar}>
         {ESTADOS.map(estado => {
           const count = (columns[estado] || []).length;
@@ -230,6 +227,7 @@ export default function Kanban() {
                   onOpenOrder={setSelectedOrder}
                   onUploadDesign={handleUploadDesign}
                   onUploadGuide={handleUploadGuide}
+                  onRefresh={fetchOrders}
                 />
               ))}
             </div>
@@ -243,6 +241,7 @@ export default function Kanban() {
                   onOpen={() => {}}
                   onUploadDesign={() => {}}
                   onUploadGuide={() => {}}
+                  onRefresh={() => {}}
                   isDragging
                   dragOverlay
                 />
@@ -273,40 +272,34 @@ function HeroStat({ num, label, color }) {
   );
 }
 
-function rolColor(rol) {
-  return rol === "admin" ? "#10b981" : rol === "operario" ? "#f59e0b" : "#6366f1";
-}
-
 const S = {
-  page: { display: "flex", flexDirection: "column", gap: "20px", fontFamily: "'DM Sans', 'Segoe UI', sans-serif", color: "#1e293b" },
-  hero: { background: "linear-gradient(135deg, #0f172a 0%, #1e293b 100%)", borderRadius: "20px", padding: "28px 32px", color: "white", display: "flex", alignItems: "center", justifyContent: "space-between", gap: "24px", flexWrap: "wrap" },
-  heroContent: {},
-  heroLabel: { fontSize: "10px", fontWeight: 700, letterSpacing: "3px", color: "#94a3b8", marginBottom: "6px" },
-  heroTitle: { fontSize: "32px", fontWeight: 800, margin: 0, letterSpacing: "-1px" },
-  heroSub: { fontSize: "13px", color: "#64748b", marginTop: "6px" },
-  heroStats: { display: "flex", gap: "8px", flexWrap: "wrap" },
-  heroStat: { background: "rgba(255,255,255,0.06)", borderRadius: "14px", padding: "12px 18px", display: "flex", flexDirection: "column", alignItems: "center", gap: "3px", border: "1px solid rgba(255,255,255,0.08)" },
-  heroStatNum: { fontSize: "24px", fontWeight: 800, lineHeight: 1 },
+  page:          { display: "flex", flexDirection: "column", gap: "20px", fontFamily: "'DM Sans','Segoe UI',sans-serif", color: "#1e293b" },
+  hero:          { background: "linear-gradient(135deg,#0f172a 0%,#1e293b 100%)", borderRadius: "20px", padding: "28px 32px", color: "white", display: "flex", alignItems: "center", justifyContent: "space-between", gap: "24px", flexWrap: "wrap" },
+  heroLabel:     { fontSize: "10px", fontWeight: 700, letterSpacing: "3px", color: "#94a3b8", marginBottom: "6px" },
+  heroTitle:     { fontSize: "32px", fontWeight: 800, margin: 0, letterSpacing: "-1px" },
+  heroSub:       { fontSize: "13px", color: "#64748b", marginTop: "6px" },
+  heroStats:     { display: "flex", gap: "8px", flexWrap: "wrap" },
+  heroStat:      { background: "rgba(255,255,255,0.06)", borderRadius: "14px", padding: "12px 18px", display: "flex", flexDirection: "column", alignItems: "center", gap: "3px", border: "1px solid rgba(255,255,255,0.08)" },
+  heroStatNum:   { fontSize: "24px", fontWeight: 800, lineHeight: 1 },
   heroStatLabel: { fontSize: "10px", color: "#64748b", whiteSpace: "nowrap" },
-  filterBar: { display: "flex", alignItems: "center", gap: "12px", flexWrap: "wrap", background: "white", borderRadius: "16px", padding: "14px 20px", border: "1px solid #e2e8f0" },
-  searchWrap: { position: "relative", flex: 1, minWidth: "200px" },
-  searchIcon: { position: "absolute", left: "12px", top: "50%", transform: "translateY(-50%)", fontSize: "18px", color: "#94a3b8", pointerEvents: "none" },
-  searchInput: { width: "100%", paddingLeft: "38px", paddingRight: "14px", paddingTop: "9px", paddingBottom: "9px", borderRadius: "10px", border: "1.5px solid #e2e8f0", fontSize: "13px", outline: "none", fontFamily: "inherit", boxSizing: "border-box" },
-  filterGroup: { display: "flex", alignItems: "center", gap: "6px" },
-  filterLabel: { fontSize: "12px", fontWeight: 600, color: "#94a3b8", whiteSpace: "nowrap" },
-  filterSelect: { padding: "8px 12px", borderRadius: "10px", border: "1.5px solid #e2e8f0", fontSize: "13px", fontFamily: "inherit", outline: "none", background: "white" },
-  rolBadge: { display: "flex", alignItems: "center", gap: "7px", padding: "7px 14px", borderRadius: "40px", background: "#f8fafc", border: "1px solid #e2e8f0", fontSize: "12px", fontWeight: 700, color: "#475569", textTransform: "capitalize", marginLeft: "auto" },
-  rolDot: (rol) => ({ width: "8px", height: "8px", borderRadius: "50%", background: rolColor(rol), flexShrink: 0 }),
-  readonlyChip: { fontSize: "11px", fontWeight: 600, padding: "5px 12px", borderRadius: "40px", background: "#f1f5f9", color: "#64748b", border: "1px solid #e2e8f0" },
-  pipelineBar: { display: "flex", gap: "12px", background: "white", borderRadius: "16px", padding: "16px 20px", border: "1px solid #e2e8f0", flexWrap: "wrap" },
-  pipelineItem: { flex: 1, minWidth: "120px", display: "flex", flexDirection: "column", gap: "6px" },
-  pipelineInfo: { display: "flex", justifyContent: "space-between", alignItems: "baseline" },
-  pipelineEstado: { fontSize: "11px", fontWeight: 600, color: "#64748b" },
+  filterBar:     { display: "flex", alignItems: "center", gap: "12px", flexWrap: "wrap", background: "white", borderRadius: "16px", padding: "14px 20px", border: "1px solid #e2e8f0" },
+  searchWrap:    { position: "relative", flex: 1, minWidth: "200px" },
+  searchIcon:    { position: "absolute", left: "12px", top: "50%", transform: "translateY(-50%)", fontSize: "18px", color: "#94a3b8", pointerEvents: "none" },
+  searchInput:   { width: "100%", paddingLeft: "38px", paddingRight: "14px", paddingTop: "9px", paddingBottom: "9px", borderRadius: "10px", border: "1.5px solid #e2e8f0", fontSize: "13px", outline: "none", fontFamily: "inherit", boxSizing: "border-box" },
+  filterGroup:   { display: "flex", alignItems: "center", gap: "6px" },
+  filterLabel:   { fontSize: "12px", fontWeight: 600, color: "#94a3b8", whiteSpace: "nowrap" },
+  filterSelect:  { padding: "8px 12px", borderRadius: "10px", border: "1.5px solid #e2e8f0", fontSize: "13px", fontFamily: "inherit", outline: "none", background: "white" },
+  rolBadge:      { display: "flex", alignItems: "center", gap: "7px", padding: "7px 14px", borderRadius: "40px", background: "#f8fafc", border: "1px solid #e2e8f0", fontSize: "12px", fontWeight: 700, color: "#475569", textTransform: "capitalize", marginLeft: "auto" },
+  readonlyChip:  { fontSize: "11px", fontWeight: 600, padding: "5px 12px", borderRadius: "40px", background: "#f1f5f9", color: "#64748b", border: "1px solid #e2e8f0" },
+  pipelineBar:   { display: "flex", gap: "12px", background: "white", borderRadius: "16px", padding: "16px 20px", border: "1px solid #e2e8f0", flexWrap: "wrap" },
+  pipelineItem:  { flex: 1, minWidth: "120px", display: "flex", flexDirection: "column", gap: "6px" },
+  pipelineInfo:  { display: "flex", justifyContent: "space-between", alignItems: "baseline" },
+  pipelineEstado:{ fontSize: "11px", fontWeight: 600, color: "#64748b" },
   pipelineCount: { fontSize: "15px", fontWeight: 800 },
   pipelineTrack: { height: "6px", background: "#f1f5f9", borderRadius: "40px", overflow: "hidden" },
-  pipelineFill: { height: "100%", borderRadius: "40px", transition: "width 0.4s ease" },
-  loadingWrap: { display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "80px", gap: "16px", background: "white", borderRadius: "16px", border: "1px solid #e2e8f0" },
-  spinner: { width: "32px", height: "32px", border: "3px solid #e2e8f0", borderTop: "3px solid #6366f1", borderRadius: "50%", animation: "spin 0.8s linear infinite" },
-  boardWrap: { overflowX: "auto", paddingBottom: "8px" },
-  board: { display: "grid", gridTemplateColumns: "repeat(5, minmax(280px, 1fr))", gap: "14px", minWidth: "1440px" },
+  pipelineFill:  { height: "100%", borderRadius: "40px", transition: "width 0.4s ease" },
+  loadingWrap:   { display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "80px", gap: "16px", background: "white", borderRadius: "16px", border: "1px solid #e2e8f0" },
+  spinner:       { width: "32px", height: "32px", border: "3px solid #e2e8f0", borderTop: "3px solid #6366f1", borderRadius: "50%", animation: "spin 0.8s linear infinite" },
+  boardWrap:     { overflowX: "auto", paddingBottom: "8px" },
+  board:         { display: "grid", gridTemplateColumns: "repeat(5, minmax(280px, 1fr))", gap: "14px", minWidth: "1440px" },
 };

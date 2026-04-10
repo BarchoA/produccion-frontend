@@ -4,21 +4,25 @@ import Kanban from "./pages/Kanban";
 import CreateOrder from "./pages/CreateOrder";
 import Login from "./pages/Login";
 import Inventory from "./pages/Inventory";
-import { useAuth } from "./context/AuthContext";
 import Finance from "./pages/Finance";
+import Dashboard from "./pages/Dashboard";
+import Shipments from "./pages/Shipments";
+import Clients from "./pages/Clients";
+import { useAuth } from "./context/AuthContext";
+
 
 function Placeholder({ title, text }) {
   return (
-    <div className="rounded-2xl border border-dashed border-slate-300 bg-white p-10 text-center">
-      <h3 className="text-xl font-semibold text-slate-800">{title}</h3>
-      <p className="mt-2 text-sm text-slate-500">{text}</p>
+    <div style={{ borderRadius: "20px", border: "2px dashed #e2e8f0", background: "white", padding: "60px", textAlign: "center" }}>
+      <h3 style={{ fontSize: "20px", fontWeight: 700, color: "#1e293b", margin: "0 0 8px" }}>{title}</h3>
+      <p style={{ fontSize: "14px", color: "#94a3b8", margin: 0 }}>{text}</p>
     </div>
   );
 }
 
-function App() {
+export default function App() {
   const { session, loading, profile } = useAuth();
-  const [view, setView] = useState("kanban");
+  const [view, setView] = useState("dashboard");
 
   useEffect(() => {
     if (profile?.rol !== "admin" && view !== "kanban") {
@@ -28,34 +32,34 @@ function App() {
 
   if (loading) {
     return (
-      <div className="flex min-h-screen items-center justify-center bg-slate-100">
-        <div className="rounded-2xl bg-white px-6 py-4 text-sm font-medium text-slate-700 shadow-sm ring-1 ring-slate-200">
-          Cargando...
+      <div style={{ display: "flex", minHeight: "100vh", alignItems: "center", justifyContent: "center", background: "#f8fafc", fontFamily: "'DM Sans','Segoe UI',sans-serif" }}>
+        <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: "16px" }}>
+          <div style={{ width: "40px", height: "40px", border: "3px solid #e2e8f0", borderTop: "3px solid #6366f1", borderRadius: "50%", animation: "spin 0.8s linear infinite" }} />
+          <p style={{ color: "#94a3b8", fontSize: "14px", margin: 0 }}>Cargando...</p>
         </div>
+        <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
       </div>
     );
   }
 
-  if (!session) {
-    return <Login />;
-  }
+  if (!session) return <Login />;
 
   return (
     <Layout currentView={view} setCurrentView={setView}>
       {!profile && (
         <Placeholder
           title="Perfil no encontrado"
-          text="La sesión existe, pero este usuario no tiene registro en profiles. Revisa la tabla profiles en Supabase."
+          text="La sesión existe pero este usuario no tiene registro en profiles. Revisa la tabla profiles en Supabase."
         />
       )}
-
-      {profile && view === "kanban" && <Kanban />}
-      {profile && view === "create" && <CreateOrder />}
+      {profile && view === "dashboard"  && <Dashboard />}
+      {profile && view === "kanban"     && <Kanban />}
+      {profile && view === "create"     && <CreateOrder />}
+      {profile && view === "envios"     && <Shipments />}
+      {profile && view === "clientes"   && <Clients />}
       {profile && view === "inventario" && <Inventory />}
-      {profile && view === "finanzas" && <Finance/>}
-      
+      {profile && view === "finanzas"   && <Finance />}
+      {profile && view === "dashboard" && <Dashboard />}
     </Layout>
   );
 }
-
-export default App;

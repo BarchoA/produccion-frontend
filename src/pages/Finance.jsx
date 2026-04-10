@@ -6,7 +6,7 @@ import {
   ResponsiveContainer, Legend, PieChart, Pie, Cell, LineChart, Line,
 } from "recharts";
 
-const PALETTE = { venta: "#6366f1", costo: "#f59e0b", margen: "#10b981" };
+const PALETTE = { venta: "#6366f1", costo: "#f59e0b", margen: "#10b981", transporte: "#f97316" };
 const PIE_COLORS = ["#6366f1","#10b981","#f59e0b","#0ea5e9","#ec4899","#14b8a6","#f97316"];
 
 const fmt   = v => `$${Number(v || 0).toFixed(2)}`;
@@ -31,27 +31,28 @@ function diffPct(cur, prev) {
 
 function agg(rows) {
   return rows.reduce((acc, r) => ({
-    venta:    acc.venta    + Number(r.subtotal_venta  || 0),
-    costo:    acc.costo    + Number(r.subtotal_costo  || 0),
-    margen:   acc.margen   + Number(r.margen          || 0),
-    cantidad: acc.cantidad + Number(r.cantidad        || 0),
-  }), { venta: 0, costo: 0, margen: 0, cantidad: 0 });
+    venta:      acc.venta      + Number(r.subtotal_venta  || 0),
+    costo:      acc.costo      + Number(r.subtotal_costo  || 0),
+    margen:     acc.margen     + Number(r.margen          || 0),
+    cantidad:   acc.cantidad   + Number(r.cantidad        || 0),
+    transporte: acc.transporte + Number(r.costo_transporte || 0) / Math.max(1, rows.filter(x => x.order_id === r.order_id).length),
+  }), { venta: 0, costo: 0, margen: 0, cantidad: 0, transporte: 0 });
+}
+
+// Para el margen real restamos el costo de transporte prorrateado
+function calcMargenReal(subtotalVenta, subtotalCosto, costoTransporte) {
+  return Number(subtotalVenta || 0) - Number(subtotalCosto || 0) - Number(costoTransporte || 0);
 }
 
 function buildTop(rows) {
   const g = {};
   for (const r of rows) {
     const k = r.variant_id || r.catalog_item_id || r.descripcion || r.order_item_id;
-    if (!g[k]) g[k] = {
-      nombre:    r.variant_name || r.catalog_item_nombre || r.descripcion || "Sin nombre",
-      linea:     r.linea || "–",
-      image_url: r.image_url || null,
-      margen: 0, cantidad: 0, venta: 0, costo: 0,
-    };
-    g[k].margen   += Number(r.margen          || 0);
-    g[k].cantidad += Number(r.cantidad        || 0);
-    g[k].venta    += Number(r.subtotal_venta  || 0);
-    g[k].costo    += Number(r.subtotal_costo  || 0);
+    if (!g[k]) g[k] = { nombre: r.variant_name || r.catalog_item_nombre || r.descripcion || "Sin nombre", linea: r.linea || "–", image_url: null, margen: 0, cantidad: 0, venta: 0, costo: 0 };
+    g[k].margen   += Number(r.margen   || 0);
+    g[k].cantidad += Number(r.cantidad || 0);
+    g[k].venta    += Number(r.subtotal_venta || 0);
+    g[k].costo    += Number(r.subtotal_costo || 0);
   }
   return Object.values(g);
 }
@@ -66,163 +67,107 @@ function buildByDay(rows) {
     g[day].costo  += Number(r.subtotal_costo || 0);
     g[day].margen += Number(r.margen         || 0);
   }
-  return Object.values(g)
-    .sort((a, b) => a.day.localeCompare(b.day))
+  return Object.values(g).sort((a, b) => a.day.localeCompare(b.day))
     .map(d => ({ ...d, Venta: +d.venta.toFixed(2), Costo: +d.costo.toFixed(2), Margen: +d.margen.toFixed(2) }));
 }
 
-// ── Specs legibles ────────────────────────────────────────────────────────────
 function specsToString(specs) {
   if (!specs || typeof specs !== "object") return "";
-  const labels = {
-    tinta: "Tinta", uv: "UV carcasa", formato: "Formato",
-    equivalente: "Equiv. A3", metros_cuadrados: "m²",
-    modo_trabajo: "Modo", articulo: "Artículo",
-    modo_dtf: "Modo DTF", destino: "Destino",
-    observacion_tecnica: "Obs.",
-  };
-  return Object.entries(specs)
-    .filter(([, v]) => v !== null && v !== "" && v !== false && v !== 0)
-    .map(([k, v]) => `${labels[k] || k}: ${v}`)
-    .join(" | ");
+  const labels = { tinta: "Tinta", uv: "UV carcasa", formato: "Formato", equivalente: "Equiv. A3", metros_cuadrados: "m²", modo_trabajo: "Modo", articulo: "Artículo", modo_dtf: "Modo DTF", destino: "Destino", observacion_tecnica: "Obs." };
+  return Object.entries(specs).filter(([, v]) => v !== null && v !== "" && v !== false && v !== 0)
+    .map(([k, v]) => `${labels[k] || k}: ${v}`).join(" | ");
 }
 
-// ── Export Excel ──────────────────────────────────────────────────────────────
 async function exportToExcel(rows, curStart, curEnd) {
   try {
     const XLSX = await import("xlsx");
 
-    // ── Hoja 1: Detalle completo ──
     const detalle = rows.map(r => {
       const specs = r.specs || {};
-      const pct   = r.subtotal_venta > 0
-        ? +((Number(r.margen || 0) / Number(r.subtotal_venta)) * 100).toFixed(2)
-        : 0;
-
+      const pct   = r.subtotal_venta > 0 ? +((Number(r.margen || 0) / Number(r.subtotal_venta)) * 100).toFixed(2) : 0;
+      const margenReal = calcMargenReal(r.subtotal_venta, r.subtotal_costo, r.costo_transporte);
+      const pctReal    = r.subtotal_venta > 0 ? +((margenReal / Number(r.subtotal_venta)) * 100).toFixed(2) : 0;
       return {
-        "Fecha":              (r.fecha_creacion || "").split("T")[0],
-        "# Orden":            r.order_number    || "",
-        "Cliente":            r.cliente_nombre  || "",
-        "Estado":             r.estado          || "",
-        "Prioridad":          r.prioridad       || "",
-        "Descripción":        r.descripcion     || "",
-        "Línea":              r.linea           || "",
-        // Sellos
-        "Producto":           r.product_nombre  || "",
-        "Variante / Modelo":  r.variant_name    || "",
-        // UV
-        "Tipo UV":            r.catalog_item_nombre || "",
-        // Specs dinámicos
-        "Tinta":              specs.tinta        || "",
-        "UV en carcasa":      specs.uv === true ? "Sí" : specs.uv === false ? "No" : "",
-        "Formato UV-DTF":     specs.formato      || "",
-        "Equiv. Plancha A3":  specs.equivalente  || "",
-        "m² UV-Textil":       specs.metros_cuadrados || "",
-        "Modo trabajo":       specs.modo_trabajo || "",
-        "Artículo":           specs.articulo     || "",
-        "Modo DTF":           specs.modo_dtf     || "",
-        "Destino":            specs.destino      || "",
-        "Obs. Técnica":       specs.observacion_tecnica || "",
-        "Otros specs":        specsToString(
-          Object.fromEntries(
-            Object.entries(specs).filter(([k]) =>
-              !["tinta","uv","formato","equivalente","metros_cuadrados","modo_trabajo","articulo","modo_dtf","destino","observacion_tecnica"].includes(k)
-            )
-          )
-        ),
-        // Números
-        "Cantidad":           Number(r.cantidad        || 0),
-        "Precio Unit. ($)":   Number(r.precio_unitario || 0),
-        "Venta Subtotal ($)": Number(r.subtotal_venta  || 0),
-        "Costo Unit. ($)":    Number(r.variant_cost    || 0),
-        "Costo Subtotal ($)": Number(r.subtotal_costo  || 0),
-        "Margen ($)":         Number(r.margen          || 0),
-        "% Margen":           pct,
-        "PDF Orden":          r.pdf_url || "",
+        "Fecha":               (r.fecha_creacion || "").split("T")[0],
+        "# Orden":             r.order_number    || "",
+        "Cliente":             r.cliente_nombre  || "",
+        "Estado":              r.estado          || "",
+        "Descripción":         r.descripcion     || "",
+        "Línea":               r.linea           || "",
+        "Producto":            r.product_nombre  || "",
+        "Variante":            r.variant_name    || "",
+        "Tipo UV":             r.catalog_item_nombre || "",
+        "Tinta":               specs.tinta        || "",
+        "UV en carcasa":       specs.uv === true ? "Sí" : specs.uv === false ? "No" : "",
+        "Formato UV-DTF":      specs.formato      || "",
+        "Equiv. A3":           specs.equivalente  || "",
+        "m² UV-Textil":        specs.metros_cuadrados || "",
+        "Otros specs":         specsToString(Object.fromEntries(Object.entries(specs).filter(([k]) => !["tinta","uv","formato","equivalente","metros_cuadrados"].includes(k)))),
+        "Cantidad":            Number(r.cantidad        || 0),
+        "Precio Unit. ($)":    Number(r.precio_unitario || 0),
+        "Venta ($)":           Number(r.subtotal_venta  || 0),
+        "Costo Producto ($)":  Number(r.subtotal_costo  || 0),
+        "Costo Transporte ($)":Number(r.costo_transporte || 0),
+        "Transportista":       r.transportista    || "",
+        "Margen Bruto ($)":    Number(r.margen          || 0),
+        "% Margen Bruto":      pct,
+        "Margen Real ($)":     +margenReal.toFixed(2),
+        "% Margen Real":       pctReal,
+        "PDF Orden":           r.pdf_url          || "",
       };
     });
 
-    // ── Hoja 2: Resumen por línea ──
     const byLine = {};
     for (const r of rows) {
       const l = r.linea || "Sin línea";
-      if (!byLine[l]) byLine[l] = { Línea: l, Venta: 0, Costo: 0, Margen: 0, Cantidad: 0, Órdenes: new Set() };
-      byLine[l].Venta    += Number(r.subtotal_venta || 0);
-      byLine[l].Costo    += Number(r.subtotal_costo || 0);
-      byLine[l].Margen   += Number(r.margen         || 0);
-      byLine[l].Cantidad += Number(r.cantidad       || 0);
+      if (!byLine[l]) byLine[l] = { Línea: l, Venta: 0, Costo: 0, Transporte: 0, Margen: 0, MargenReal: 0, Cantidad: 0, Órdenes: new Set() };
+      byLine[l].Venta      += Number(r.subtotal_venta  || 0);
+      byLine[l].Costo      += Number(r.subtotal_costo  || 0);
+      byLine[l].Transporte += Number(r.costo_transporte || 0);
+      byLine[l].Margen     += Number(r.margen          || 0);
+      byLine[l].MargenReal += calcMargenReal(r.subtotal_venta, r.subtotal_costo, r.costo_transporte);
+      byLine[l].Cantidad   += Number(r.cantidad        || 0);
       if (r.order_id) byLine[l].Órdenes.add(r.order_id);
     }
     const resumenLinea = Object.values(byLine).map(l => ({
-      "Línea":       l.Línea,
-      "Venta ($)":   +l.Venta.toFixed(2),
-      "Costo ($)":   +l.Costo.toFixed(2),
-      "Margen ($)":  +l.Margen.toFixed(2),
-      "% Margen":    l.Venta > 0 ? +((l.Margen / l.Venta) * 100).toFixed(2) : 0,
-      "Cantidad":    l.Cantidad,
-      "# Órdenes":   l.Órdenes.size,
+      "Línea":              l.Línea,
+      "Venta ($)":          +l.Venta.toFixed(2),
+      "Costo Producto ($)": +l.Costo.toFixed(2),
+      "Costo Transporte ($)":+l.Transporte.toFixed(2),
+      "Margen Bruto ($)":   +l.Margen.toFixed(2),
+      "Margen Real ($)":    +l.MargenReal.toFixed(2),
+      "% Margen Real":      l.Venta > 0 ? +((l.MargenReal / l.Venta) * 100).toFixed(2) : 0,
+      "Cantidad":           l.Cantidad,
+      "# Órdenes":          l.Órdenes.size,
     }));
 
-    // ── Hoja 3: Resumen por producto/variante ──
-    const byVariant = {};
-    for (const r of rows) {
-      const k = r.variant_id || r.catalog_item_id || r.descripcion || "sin-key";
-      const nombre = r.variant_name || r.catalog_item_nombre || r.descripcion || "Sin nombre";
-      if (!byVariant[k]) byVariant[k] = {
-        "Producto":    r.product_nombre || "",
-        "Variante":    nombre,
-        "Tipo UV":     r.catalog_item_nombre || "",
-        "Línea":       r.linea || "",
-        Venta: 0, Costo: 0, Margen: 0, Cantidad: 0,
-      };
-      byVariant[k].Venta    += Number(r.subtotal_venta || 0);
-      byVariant[k].Costo    += Number(r.subtotal_costo || 0);
-      byVariant[k].Margen   += Number(r.margen         || 0);
-      byVariant[k].Cantidad += Number(r.cantidad       || 0);
-    }
-    const resumenVariante = Object.values(byVariant)
-      .sort((a, b) => b.Margen - a.Margen)
-      .map(v => ({
-        "Producto":    v["Producto"],
-        "Variante":    v["Variante"],
-        "Tipo UV":     v["Tipo UV"],
-        "Línea":       v["Línea"],
-        "Venta ($)":   +v.Venta.toFixed(2),
-        "Costo ($)":   +v.Costo.toFixed(2),
-        "Margen ($)":  +v.Margen.toFixed(2),
-        "% Margen":    v.Venta > 0 ? +((v.Margen / v.Venta) * 100).toFixed(2) : 0,
-        "Cantidad":    v.Cantidad,
-      }));
+    const totVenta     = rows.reduce((a, r) => a + Number(r.subtotal_venta  || 0), 0);
+    const totCosto     = rows.reduce((a, r) => a + Number(r.subtotal_costo  || 0), 0);
+    const totTrans     = rows.reduce((a, r) => a + Number(r.costo_transporte || 0), 0);
+    const totMargen    = rows.reduce((a, r) => a + Number(r.margen          || 0), 0);
+    const totMargenReal = totVenta - totCosto - totTrans;
 
-    // ── Hoja 4: Totales ──
-    const totales = agg(rows);
     const resumenGeneral = [
-      { "Métrica": "Período",         "Valor": `${curStart} → ${curEnd}` },
-      { "Métrica": "Venta total",     "Valor": +totales.venta.toFixed(2)   },
-      { "Métrica": "Costo total",     "Valor": +totales.costo.toFixed(2)   },
-      { "Métrica": "Margen total",    "Valor": +totales.margen.toFixed(2)  },
-      { "Métrica": "% Margen",        "Valor": totales.venta > 0 ? +((totales.margen / totales.venta) * 100).toFixed(2) : 0 },
-      { "Métrica": "Unidades total",  "Valor": totales.cantidad             },
-      { "Métrica": "Total ítems",     "Valor": rows.length                  },
+      { "Métrica": "Período",             "Valor": `${curStart} → ${curEnd}` },
+      { "Métrica": "Venta total",         "Valor": +totVenta.toFixed(2) },
+      { "Métrica": "Costo producto",      "Valor": +totCosto.toFixed(2) },
+      { "Métrica": "Costo transporte",    "Valor": +totTrans.toFixed(2) },
+      { "Métrica": "Margen bruto",        "Valor": +totMargen.toFixed(2) },
+      { "Métrica": "Margen real",         "Valor": +totMargenReal.toFixed(2) },
+      { "Métrica": "% Margen real",       "Valor": totVenta > 0 ? +((totMargenReal / totVenta) * 100).toFixed(2) : 0 },
+      { "Métrica": "Unidades",            "Valor": rows.reduce((a, r) => a + Number(r.cantidad || 0), 0) },
     ];
 
-    // ── Crear workbook ──
     const wb  = XLSX.utils.book_new();
     const ws1 = XLSX.utils.json_to_sheet(detalle);
     const ws2 = XLSX.utils.json_to_sheet(resumenLinea);
-    const ws3 = XLSX.utils.json_to_sheet(resumenVariante);
-    const ws4 = XLSX.utils.json_to_sheet(resumenGeneral);
-
-    ws1["!cols"] = [10,14,20,10,10,28,12,18,18,16,10,12,14,12,10,12,14,12,12,20,20,10,12,14,12,14,10,30].map(w => ({ wch: w }));
-    ws2["!cols"] = [16,12,12,12,10,10,10].map(w => ({ wch: w }));
-    ws3["!cols"] = [20,22,16,12,12,12,12,10,10].map(w => ({ wch: w }));
-    ws4["!cols"] = [22,20].map(w => ({ wch: w }));
-
+    const ws3 = XLSX.utils.json_to_sheet(resumenGeneral);
+    ws1["!cols"] = [10,14,18,10,28,12,18,18,16,10,12,14,10,10,20,10,12,12,12,12,14,12,10,12,30].map(w => ({ wch: w }));
+    ws2["!cols"] = [16,12,14,14,12,12,10,10,10].map(w => ({ wch: w }));
+    ws3["!cols"] = [22,20].map(w => ({ wch: w }));
     XLSX.utils.book_append_sheet(wb, ws1, "Detalle completo");
     XLSX.utils.book_append_sheet(wb, ws2, "Por línea");
-    XLSX.utils.book_append_sheet(wb, ws3, "Por producto-variante");
-    XLSX.utils.book_append_sheet(wb, ws4, "Totales");
-
+    XLSX.utils.book_append_sheet(wb, ws3, "Totales");
     XLSX.writeFile(wb, `finanzas_${curStart}_${curEnd}.xlsx`);
   } catch (e) {
     alert("Error exportando. Verifica: npm install xlsx");
@@ -230,7 +175,6 @@ async function exportToExcel(rows, curStart, curEnd) {
   }
 }
 
-// ── Tooltip ───────────────────────────────────────────────────────────────────
 function CustomTooltip({ active, payload, label }) {
   if (!active || !payload?.length) return null;
   return (
@@ -239,9 +183,7 @@ function CustomTooltip({ active, payload, label }) {
       {payload.map((e, i) => (
         <div key={i} style={{ display: "flex", justifyContent: "space-between", gap: "20px", fontSize: "13px" }}>
           <span style={{ color: e.color }}>{e.name}</span>
-          <span style={{ color: "white", fontWeight: 700 }}>
-            {typeof e.value === "number" && e.value > 50 ? fmt(e.value) : e.value}
-          </span>
+          <span style={{ color: "white", fontWeight: 700 }}>{typeof e.value === "number" && e.value > 50 ? fmt(e.value) : e.value}</span>
         </div>
       ))}
     </div>
@@ -258,9 +200,7 @@ function KPICard({ label, cur, prev, format, icon, accent }) {
         <p style={{ ...S.kpiValue, color: accent }}>{format(cur)}</p>
         <div style={S.kpiFooter}>
           <span style={{ fontSize: "11px", color: "#94a3b8" }}>anterior: {format(prev)}</span>
-          <span style={{ ...S.kpiBadge, background: positive ? "#dcfce7" : "#fee2e2", color: positive ? "#16a34a" : "#dc2626" }}>
-            {pctLabel}
-          </span>
+          <span style={{ ...S.kpiBadge, background: positive ? "#dcfce7" : "#fee2e2", color: positive ? "#16a34a" : "#dc2626" }}>{pctLabel}</span>
         </div>
       </div>
     </div>
@@ -277,14 +217,10 @@ function DateField({ label, value, onChange }) {
 }
 
 function TopRow({ rank, item, metric, metricLabel, format }) {
-  const rc = ["#f59e0b", "#94a3b8", "#cd7c2f", "#64748b", "#64748b"];
+  const rc = ["#f59e0b","#94a3b8","#cd7c2f","#64748b","#64748b"];
   return (
     <div style={S.topRow}>
-      <div style={{ ...S.topRank, background: rc[rank - 1] + "22", color: rc[rank - 1] }}>#{rank}</div>
-      {item.image_url
-        ? <img src={item.image_url} alt="" style={S.topImg} />
-        : <div style={S.topImgEmpty}>📦</div>
-      }
+      <div style={{ ...S.topRank, background: rc[rank-1]+"22", color: rc[rank-1] }}>#{rank}</div>
       <div style={{ flex: 1, minWidth: 0 }}>
         <p style={{ fontSize: "13px", fontWeight: 700, color: "#1e293b", margin: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.nombre}</p>
         <p style={{ fontSize: "11px", color: "#94a3b8", margin: "2px 0 0" }}>{item.linea}</p>
@@ -297,7 +233,6 @@ function TopRow({ rank, item, metric, metricLabel, format }) {
   );
 }
 
-// ── Componente principal ──────────────────────────────────────────────────────
 export default function Finance() {
   const { profile } = useAuth();
   const isAdmin = profile?.rol === "admin";
@@ -320,22 +255,13 @@ export default function Finance() {
     try {
       setLoading(true);
       const [{ data: cd, error: ce }, { data: pd, error: pe }] = await Promise.all([
-        supabase.from("financial_order_items").select("*")
-          .gte("fecha_creacion", `${curStart}T00:00:00`)
-          .lte("fecha_creacion", `${curEnd}T23:59:59`),
-        supabase.from("financial_order_items").select("*")
-          .gte("fecha_creacion", `${prevStart}T00:00:00`)
-          .lte("fecha_creacion", `${prevEnd}T23:59:59`),
+        supabase.from("financial_order_items").select("*").gte("fecha_creacion", `${curStart}T00:00:00`).lte("fecha_creacion", `${curEnd}T23:59:59`),
+        supabase.from("financial_order_items").select("*").gte("fecha_creacion", `${prevStart}T00:00:00`).lte("fecha_creacion", `${prevEnd}T23:59:59`),
       ]);
-      if (ce) throw ce;
-      if (pe) throw pe;
-      setRowsCur(cd || []);
-      setRowsPrev(pd || []);
-    } catch (e) {
-      alert("Error cargando finanzas");
-    } finally {
-      setLoading(false);
-    }
+      if (ce) throw ce; if (pe) throw pe;
+      setRowsCur(cd || []); setRowsPrev(pd || []);
+    } catch (e) { alert("Error cargando finanzas"); }
+    finally { setLoading(false); }
   }
 
   const lines    = useMemo(() => ["Todas", ...[...new Set([...rowsCur, ...rowsPrev].map(r => r.linea).filter(Boolean))].sort()], [rowsCur, rowsPrev]);
@@ -343,6 +269,14 @@ export default function Finance() {
   const fPrev    = useMemo(() => selLine === "Todas" ? rowsPrev : rowsPrev.filter(r => r.linea === selLine), [rowsPrev, selLine]);
   const mCur     = useMemo(() => agg(fCur),  [fCur]);
   const mPrev    = useMemo(() => agg(fPrev), [fPrev]);
+
+  // Totales con costo transporte
+  const totTransporteCur  = useMemo(() => [...new Map(fCur.map(r => [r.order_id, Number(r.costo_transporte || 0)])).values()].reduce((a, b) => a + b, 0), [fCur]);
+  const totTransportePrev = useMemo(() => [...new Map(fPrev.map(r => [r.order_id, Number(r.costo_transporte || 0)])).values()].reduce((a, b) => a + b, 0), [fPrev]);
+  const margenRealCur  = mCur.margen  - totTransporteCur;
+  const margenRealPrev = mPrev.margen - totTransportePrev;
+  const margenPct      = mCur.venta > 0 ? ((mCur.margen / mCur.venta) * 100).toFixed(1) : "0.0";
+  const margenRealPct  = mCur.venta > 0 ? ((margenRealCur / mCur.venta) * 100).toFixed(1) : "0.0";
 
   const byLine = useMemo(() => {
     const g = {};
@@ -363,7 +297,6 @@ export default function Finance() {
   const byDay     = useMemo(() => buildByDay(fCur), [fCur]);
   const pieData   = useMemo(() => byLine.map(i => ({ name: i.linea, value: +i.margen.toFixed(2) })), [byLine]);
   const chartLine = useMemo(() => byLine.map(i => ({ linea: i.linea, Venta: +i.venta.toFixed(2), Costo: +i.costo.toFixed(2), Margen: +i.margen.toFixed(2) })), [byLine]);
-  const margenPct = mCur.venta > 0 ? ((mCur.margen / mCur.venta) * 100).toFixed(1) : "0.0";
 
   async function handleExport() { setExporting(true); await exportToExcel(fCur, curStart, curEnd); setExporting(false); }
 
@@ -371,7 +304,6 @@ export default function Finance() {
     <div style={S.restricted}>
       <span style={{ fontSize: "48px" }}>🔒</span>
       <h3 style={{ fontSize: "20px", fontWeight: 700, margin: 0 }}>Acceso restringido</h3>
-      <p style={{ color: "#94a3b8", margin: 0 }}>Solo el rol admin puede ver finanzas.</p>
     </div>
   );
 
@@ -383,12 +315,14 @@ export default function Finance() {
         <div>
           <div style={S.heroLabel}>PANEL FINANCIERO</div>
           <h2 style={S.heroTitle}>Finanzas</h2>
-          <p style={S.heroSub}>Rentabilidad, costos y volumen · Cierre mensual exportable a Excel</p>
+          <p style={S.heroSub}>Venta · Costo producto · Costo transporte · Margen real</p>
         </div>
         <div style={S.heroRight}>
           <div style={{ textAlign: "right" }}>
-            <span style={{ fontSize: "42px", fontWeight: 900, color: "#34d399", display: "block", letterSpacing: "-2px", lineHeight: 1 }}>{margenPct}%</span>
-            <span style={{ fontSize: "11px", color: "#64748b", display: "block", marginTop: "4px" }}>Margen del período</span>
+            <span style={{ fontSize: "13px", color: "#64748b", display: "block" }}>Margen bruto</span>
+            <span style={{ fontSize: "28px", fontWeight: 900, color: "#34d399", display: "block", letterSpacing: "-1px", lineHeight: 1 }}>{margenPct}%</span>
+            <span style={{ fontSize: "13px", color: "#64748b", display: "block", marginTop: "8px" }}>Margen real (c/transporte)</span>
+            <span style={{ fontSize: "28px", fontWeight: 900, color: margenRealPct >= 0 ? "#10b981" : "#ef4444", display: "block", letterSpacing: "-1px", lineHeight: 1 }}>{margenRealPct}%</span>
           </div>
           <button onClick={handleExport} disabled={exporting || loading}
             style={{ ...S.exportBtn, opacity: exporting || loading ? 0.6 : 1 }}>
@@ -402,7 +336,7 @@ export default function Finance() {
         <div style={S.filtersRow}>
           <div style={S.filterGroup}>
             <span style={S.filterGroupTitle}>📅 Periodo actual</span>
-            <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
+            <div style={{ display: "flex", gap: "10px" }}>
               <DateField label="Desde" value={curStart} onChange={setCurStart} />
               <DateField label="Hasta" value={curEnd}   onChange={setCurEnd}   />
             </div>
@@ -410,7 +344,7 @@ export default function Finance() {
           <div style={S.filterDivider} />
           <div style={S.filterGroup}>
             <span style={S.filterGroupTitle}>📊 Periodo comparativo</span>
-            <div style={{ display: "flex", gap: "10px", flexWrap: "wrap" }}>
+            <div style={{ display: "flex", gap: "10px" }}>
               <DateField label="Desde" value={prevStart} onChange={setPrevStart} />
               <DateField label="Hasta" value={prevEnd}   onChange={setPrevEnd}   />
             </div>
@@ -421,9 +355,7 @@ export default function Finance() {
             <div style={{ display: "flex", gap: "6px", flexWrap: "wrap" }}>
               {lines.map(l => (
                 <button key={l} onClick={() => setSelLine(l)}
-                  style={{ ...S.lineTab, ...(selLine === l ? S.lineTabOn : {}) }}>
-                  {l}
-                </button>
+                  style={{ ...S.lineTab, ...(selLine === l ? S.lineTabOn : {}) }}>{l}</button>
               ))}
             </div>
           </div>
@@ -434,30 +366,24 @@ export default function Finance() {
         <div style={S.loading}><div style={S.spinner} /><p style={{ color: "#94a3b8", margin: 0 }}>Cargando datos...</p></div>
       ) : (
         <>
-          {/* KPIs */}
+          {/* KPIs — ahora incluye transporte y margen real */}
           <div style={S.kpiGrid}>
-            <KPICard label="Venta total"  cur={mCur.venta}    prev={mPrev.venta}    format={fmt}   icon="💰" accent="#6366f1" />
-            <KPICard label="Costo total"  cur={mCur.costo}    prev={mPrev.costo}    format={fmt}   icon="📦" accent="#f59e0b" />
-            <KPICard label="Margen total" cur={mCur.margen}   prev={mPrev.margen}   format={fmt}   icon="📈" accent="#10b981" />
-            <KPICard label="Unidades"     cur={mCur.cantidad} prev={mPrev.cantidad} format={v => v} icon="🔢" accent="#0ea5e9" />
+            <KPICard label="Venta total"        cur={mCur.venta}        prev={mPrev.venta}        format={fmt}   icon="💰" accent="#6366f1" />
+            <KPICard label="Costo producto"     cur={mCur.costo}        prev={mPrev.costo}        format={fmt}   icon="📦" accent="#f59e0b" />
+            <KPICard label="Costo transporte"   cur={totTransporteCur}  prev={totTransportePrev}  format={fmt}   icon="🚚" accent="#f97316" />
+            <KPICard label="Margen bruto"       cur={mCur.margen}       prev={mPrev.margen}       format={fmt}   icon="📈" accent="#10b981" />
+            <KPICard label="Margen real"        cur={margenRealCur}     prev={margenRealPrev}      format={fmt}   icon="✅" accent="#16a34a" />
+            <KPICard label="Unidades"           cur={mCur.cantidad}     prev={mPrev.cantidad}     format={v => v} icon="🔢" accent="#0ea5e9" />
           </div>
 
           {/* Tabs */}
           <div style={S.tabs}>
-            {[
-              { key: "resumen",   label: "📊 Resumen"        },
-              { key: "tendencia", label: "📈 Tendencia"       },
-              { key: "tops",      label: "🏆 Top productos"   },
-              { key: "detalle",   label: "📋 Detalle"         },
-            ].map(t => (
-              <button key={t.key} onClick={() => setActiveTab(t.key)}
-                style={{ ...S.tab, ...(activeTab === t.key ? S.tabOn : {}) }}>
-                {t.label}
-              </button>
+            {[{ key: "resumen", label: "📊 Resumen" }, { key: "tendencia", label: "📈 Tendencia" }, { key: "tops", label: "🏆 Top productos" }, { key: "detalle", label: "📋 Detalle" }].map(t => (
+              <button key={t.key} onClick={() => setActiveTab(t.key)} style={{ ...S.tab, ...(activeTab === t.key ? S.tabOn : {}) }}>{t.label}</button>
             ))}
           </div>
 
-          {/* ── Resumen ── */}
+          {/* Resumen */}
           {activeTab === "resumen" && (
             <div style={S.chartsRow}>
               <div style={S.chartCard}>
@@ -468,8 +394,7 @@ export default function Finance() {
                       <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
                       <XAxis dataKey="linea" tick={{ fill: "#64748b", fontSize: 12 }} />
                       <YAxis tick={{ fill: "#64748b", fontSize: 12 }} />
-                      <Tooltip content={<CustomTooltip />} />
-                      <Legend />
+                      <Tooltip content={<CustomTooltip />} /><Legend />
                       <Bar dataKey="Venta"  fill={PALETTE.venta}  radius={[6,6,0,0]} />
                       <Bar dataKey="Costo"  fill={PALETTE.costo}  radius={[6,6,0,0]} />
                       <Bar dataKey="Margen" fill={PALETTE.margen} radius={[6,6,0,0]} />
@@ -495,7 +420,7 @@ export default function Finance() {
                 <div style={{ overflowX: "auto" }}>
                   <table style={S.table}>
                     <thead>
-                      <tr>{["Línea","Venta","Costo","Margen","% Margen","Cantidad"].map(h => <th key={h} style={S.th}>{h}</th>)}</tr>
+                      <tr>{["Línea","Venta","Costo producto","Margen bruto","% Margen","Cantidad"].map(h => <th key={h} style={S.th}>{h}</th>)}</tr>
                     </thead>
                     <tbody>
                       {byLine.map((row, i) => {
@@ -507,18 +432,13 @@ export default function Finance() {
                             <td style={S.td}>{fmt(row.costo)}</td>
                             <td style={{ ...S.td, color: "#10b981", fontWeight: 700 }}>{fmt(row.margen)}</td>
                             <td style={S.td}>
-                              <div style={S.pctBar}>
-                                <div style={{ ...S.pctFill, width: `${Math.min(Number(pct), 100)}%` }} />
-                                <span style={S.pctLabel}>{pct}%</span>
-                              </div>
+                              <div style={S.pctBar}><div style={{ ...S.pctFill, width: `${Math.min(Number(pct), 100)}%` }} /><span style={S.pctLabel}>{pct}%</span></div>
                             </td>
                             <td style={S.td}>{row.cantidad}</td>
                           </tr>
                         );
                       })}
-                      {byLine.length === 0 && (
-                        <tr><td colSpan={6} style={{ ...S.td, textAlign: "center", color: "#94a3b8", padding: "32px" }}>Sin datos</td></tr>
-                      )}
+                      {byLine.length === 0 && <tr><td colSpan={6} style={{ ...S.td, textAlign: "center", color: "#94a3b8", padding: "32px" }}>Sin datos</td></tr>}
                     </tbody>
                   </table>
                 </div>
@@ -526,7 +446,7 @@ export default function Finance() {
             </div>
           )}
 
-          {/* ── Tendencia ── */}
+          {/* Tendencia */}
           {activeTab === "tendencia" && (
             <div style={S.chartCard}>
               <p style={S.chartTitle}>Evolución diaria del período</p>
@@ -543,94 +463,74 @@ export default function Finance() {
                   </LineChart>
                 </ResponsiveContainer>
               </div>
-              {byDay.length === 0 && <p style={{ textAlign: "center", color: "#94a3b8" }}>Sin datos para este período</p>}
             </div>
           )}
 
-          {/* ── Tops ── */}
+          {/* Tops */}
           {activeTab === "tops" && (
             <div style={S.chartsRow}>
               <div style={S.chartCard}>
                 <p style={S.chartTitle}>🥇 Top 5 por margen</p>
-                <p style={{ fontSize: "13px", color: "#94a3b8", margin: "0 0 16px" }}>Productos más rentables</p>
                 <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
-                  {topMargin.length === 0
-                    ? <p style={{ color: "#94a3b8" }}>Sin datos</p>
-                    : topMargin.map((item, i) => <TopRow key={i} rank={i + 1} item={item} metric="margen"   metricLabel="Margen"   format={fmt}   />)
-                  }
+                  {topMargin.length === 0 ? <p style={{ color: "#94a3b8" }}>Sin datos</p> : topMargin.map((item, i) => <TopRow key={i} rank={i+1} item={item} metric="margen"   metricLabel="Margen"   format={fmt}   />)}
                 </div>
               </div>
               <div style={S.chartCard}>
                 <p style={S.chartTitle}>📦 Top 5 por cantidad</p>
-                <p style={{ fontSize: "13px", color: "#94a3b8", margin: "0 0 16px" }}>Mayor volumen de unidades</p>
                 <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
-                  {topQty.length === 0
-                    ? <p style={{ color: "#94a3b8" }}>Sin datos</p>
-                    : topQty.map((item, i) => <TopRow key={i} rank={i + 1} item={item} metric="cantidad" metricLabel="Unidades" format={v => v} />)
-                  }
+                  {topQty.length === 0 ? <p style={{ color: "#94a3b8" }}>Sin datos</p> : topQty.map((item, i) => <TopRow key={i} rank={i+1} item={item} metric="cantidad" metricLabel="Unidades" format={v => v} />)}
                 </div>
               </div>
             </div>
           )}
 
-          {/* ── Detalle ── */}
+          {/* Detalle */}
           {activeTab === "detalle" && (
             <div style={S.chartCard}>
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "16px" }}>
-                <p style={{ ...S.chartTitle, margin: 0 }}>Detalle completo de ítems</p>
+                <p style={{ ...S.chartTitle, margin: 0 }}>Detalle completo</p>
                 <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
                   <span style={{ fontSize: "13px", color: "#94a3b8" }}>{fCur.length} registros</span>
-                  <button onClick={handleExport} disabled={exporting} style={S.exportBtnSm}>
-                    {exporting ? "..." : "📥 Excel"}
-                  </button>
+                  <button onClick={handleExport} disabled={exporting} style={S.exportBtnSm}>{exporting ? "..." : "📥 Excel"}</button>
                 </div>
               </div>
               <div style={{ overflowX: "auto" }}>
                 <table style={S.table}>
                   <thead>
                     <tr>
-                      {["Fecha","# Orden","Cliente","Descripción","Línea","Producto","Variante","Tipo UV","Specs","Cant.","Venta","Costo","Margen","% Margen"].map(h => (
+                      {["Fecha","# Orden","Cliente","Descripción","Línea","Variante","Cant.","Venta","Costo Prod.","Costo Trans.","Margen Bruto","Margen Real","% Real"].map(h => (
                         <th key={h} style={S.th}>{h}</th>
                       ))}
                     </tr>
                   </thead>
                   <tbody>
                     {fCur.slice(0, 200).map((r, i) => {
-                      const pct = r.subtotal_venta > 0
-                        ? ((Number(r.margen || 0) / Number(r.subtotal_venta)) * 100).toFixed(1)
-                        : "0.0";
-                      const specsStr = specsToString(r.specs || {});
+                      const margenReal = calcMargenReal(r.subtotal_venta, r.subtotal_costo, r.costo_transporte);
+                      const pctReal    = r.subtotal_venta > 0 ? ((margenReal / Number(r.subtotal_venta)) * 100).toFixed(1) : "0.0";
                       return (
                         <tr key={i} style={{ background: i % 2 === 0 ? "#f8fafc" : "white" }}>
                           <td style={S.td}>{(r.fecha_creacion || "").split("T")[0]}</td>
                           <td style={{ ...S.td, fontWeight: 700 }}>{r.order_number || "—"}</td>
                           <td style={S.td}>{r.cliente_nombre || "—"}</td>
-                          <td style={{ ...S.td, maxWidth: "140px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.descripcion || "—"}</td>
+                          <td style={{ ...S.td, maxWidth: "130px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.descripcion || "—"}</td>
                           <td style={S.td}><span style={S.chip}>{r.linea || "—"}</span></td>
-                          <td style={S.td}>{r.product_nombre || "—"}</td>
-                          <td style={{ ...S.td, fontWeight: 600 }}>{r.variant_name || "—"}</td>
-                          <td style={S.td}>{r.catalog_item_nombre || "—"}</td>
-                          <td style={{ ...S.td, maxWidth: "160px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: "11px", color: "#64748b" }}>{specsStr || "—"}</td>
+                          <td style={{ ...S.td, fontWeight: 600 }}>{r.variant_name || r.catalog_item_nombre || "—"}</td>
                           <td style={S.td}>{r.cantidad}</td>
                           <td style={S.td}>{fmt(r.subtotal_venta)}</td>
                           <td style={S.td}>{fmt(r.subtotal_costo)}</td>
+                          <td style={{ ...S.td, color: "#f97316", fontWeight: r.costo_transporte > 0 ? 700 : 400 }}>
+                            {r.costo_transporte > 0 ? fmt(r.costo_transporte) : "—"}
+                          </td>
                           <td style={{ ...S.td, color: "#10b981", fontWeight: 700 }}>{fmt(r.margen)}</td>
+                          <td style={{ ...S.td, color: margenReal >= 0 ? "#16a34a" : "#dc2626", fontWeight: 700 }}>{fmt(margenReal)}</td>
                           <td style={S.td}>
-                            <span style={{ ...S.pctChip, background: Number(pct) >= 30 ? "#dcfce7" : Number(pct) >= 10 ? "#fef9c3" : "#fee2e2", color: Number(pct) >= 30 ? "#16a34a" : Number(pct) >= 10 ? "#ca8a04" : "#dc2626" }}>
-                              {pct}%
-                            </span>
+                            <span style={{ ...S.pctChip, background: Number(pctReal) >= 30 ? "#dcfce7" : Number(pctReal) >= 10 ? "#fef9c3" : "#fee2e2", color: Number(pctReal) >= 30 ? "#16a34a" : Number(pctReal) >= 10 ? "#ca8a04" : "#dc2626" }}>{pctReal}%</span>
                           </td>
                         </tr>
                       );
                     })}
-                    {fCur.length === 0 && (
-                      <tr><td colSpan={14} style={{ ...S.td, textAlign: "center", color: "#94a3b8", padding: "40px" }}>Sin datos en este período</td></tr>
-                    )}
-                    {fCur.length > 200 && (
-                      <tr><td colSpan={14} style={{ ...S.td, textAlign: "center", color: "#94a3b8", padding: "12px", fontStyle: "italic" }}>
-                        Mostrando 200 de {fCur.length}. Exporta el Excel para ver todos.
-                      </td></tr>
-                    )}
+                    {fCur.length === 0 && <tr><td colSpan={13} style={{ ...S.td, textAlign: "center", color: "#94a3b8", padding: "40px" }}>Sin datos</td></tr>}
+                    {fCur.length > 200 && <tr><td colSpan={13} style={{ ...S.td, textAlign: "center", color: "#94a3b8", fontStyle: "italic" }}>Mostrando 200 de {fCur.length}. Exporta Excel para ver todos.</td></tr>}
                   </tbody>
                 </table>
               </div>
@@ -663,13 +563,13 @@ const S = {
   lineTabOn:        { background: "#1e1b4b", color: "white", borderColor: "#1e1b4b" },
   loading:          { display: "flex", flexDirection: "column", alignItems: "center", padding: "80px", gap: "16px" },
   spinner:          { width: "32px", height: "32px", border: "3px solid #e2e8f0", borderTop: "3px solid #6366f1", borderRadius: "50%", animation: "spin 0.8s linear infinite" },
-  kpiGrid:          { display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(220px,1fr))", gap: "14px" },
-  kpiCard:          { background: "white", borderRadius: "16px", border: "1px solid #e2e8f0", padding: "18px 20px", display: "flex", gap: "14px", alignItems: "flex-start" },
-  kpiIcon:          { width: "44px", height: "44px", borderRadius: "12px", display: "flex", alignItems: "center", justifyContent: "center", fontSize: "22px", flexShrink: 0 },
+  kpiGrid:          { display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))", gap: "12px" },
+  kpiCard:          { background: "white", borderRadius: "16px", border: "1px solid #e2e8f0", padding: "16px 18px", display: "flex", gap: "12px", alignItems: "flex-start" },
+  kpiIcon:          { width: "40px", height: "40px", borderRadius: "10px", display: "flex", alignItems: "center", justifyContent: "center", fontSize: "20px", flexShrink: 0 },
   kpiLabel:         { fontSize: "11px", color: "#94a3b8", margin: "0 0 4px", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.5px" },
-  kpiValue:         { fontSize: "26px", fontWeight: 800, margin: 0, letterSpacing: "-1px" },
-  kpiFooter:        { display: "flex", alignItems: "center", gap: "8px", marginTop: "8px" },
-  kpiBadge:         { padding: "2px 8px", borderRadius: "40px", fontSize: "11px", fontWeight: 700 },
+  kpiValue:         { fontSize: "22px", fontWeight: 800, margin: 0, letterSpacing: "-0.5px" },
+  kpiFooter:        { display: "flex", alignItems: "center", gap: "6px", marginTop: "6px" },
+  kpiBadge:         { padding: "2px 7px", borderRadius: "40px", fontSize: "10px", fontWeight: 700 },
   tabs:             { display: "flex", gap: "4px", background: "white", borderRadius: "14px", padding: "6px", border: "1px solid #e2e8f0" },
   tab:              { flex: 1, padding: "9px 16px", borderRadius: "10px", border: "none", background: "transparent", fontSize: "13px", fontWeight: 600, color: "#64748b", cursor: "pointer", fontFamily: "inherit" },
   tabOn:            { background: "#0f172a", color: "white" },
@@ -678,14 +578,12 @@ const S = {
   chartTitle:       { fontSize: "15px", fontWeight: 700, color: "#1e293b", margin: "0 0 16px" },
   table:            { width: "100%", borderCollapse: "separate", borderSpacing: "0 3px" },
   th:               { padding: "10px 14px", textAlign: "left", fontSize: "10px", fontWeight: 700, color: "#94a3b8", letterSpacing: "1px", textTransform: "uppercase", whiteSpace: "nowrap" },
-  td:               { padding: "12px 14px", fontSize: "13px", color: "#1e293b" },
-  pctBar:           { position: "relative", background: "#f1f5f9", borderRadius: "40px", height: "20px", width: "100px", overflow: "hidden", display: "flex", alignItems: "center" },
+  td:               { padding: "11px 14px", fontSize: "12px", color: "#1e293b" },
+  pctBar:           { position: "relative", background: "#f1f5f9", borderRadius: "40px", height: "20px", width: "90px", overflow: "hidden", display: "flex", alignItems: "center" },
   pctFill:          { position: "absolute", left: 0, top: 0, bottom: 0, background: "linear-gradient(90deg,#10b981,#34d399)", borderRadius: "40px" },
   pctLabel:         { position: "relative", zIndex: 1, fontSize: "11px", fontWeight: 700, color: "#1e293b", paddingLeft: "8px" },
   pctChip:          { padding: "3px 8px", borderRadius: "40px", fontSize: "11px", fontWeight: 700 },
   chip:             { padding: "3px 8px", borderRadius: "6px", fontSize: "11px", fontWeight: 600, background: "#f1f5f9", color: "#475569" },
   topRow:           { display: "flex", alignItems: "center", gap: "12px", padding: "10px 12px", background: "#f8fafc", borderRadius: "12px" },
-  topRank:          { width: "30px", height: "30px", borderRadius: "8px", display: "flex", alignItems: "center", justifyContent: "center", fontSize: "11px", fontWeight: 800, flexShrink: 0 },
-  topImg:           { width: "40px", height: "40px", borderRadius: "10px", objectFit: "cover", border: "1px solid #e2e8f0" },
-  topImgEmpty:      { width: "40px", height: "40px", borderRadius: "10px", background: "#f1f5f9", display: "flex", alignItems: "center", justifyContent: "center", fontSize: "18px", border: "1px solid #e2e8f0" },
+  topRank:          { width: "28px", height: "28px", borderRadius: "8px", display: "flex", alignItems: "center", justifyContent: "center", fontSize: "11px", fontWeight: 800, flexShrink: 0 },
 };
